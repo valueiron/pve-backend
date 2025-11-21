@@ -1,0 +1,5 @@
+flask
+prometheus-client
+python-dotenv
+flask-cors
+requests
