@@ -315,6 +315,8 @@ class ProxmoxClient:
             raise
         except Exception as e:
             raise Exception(f"Error shutting down VM {vmid}: {str(e)}")
+    
+# VNC console functionality has been removed
 
 # Global instance (lazy initialization)
 _proxmox_client = None
