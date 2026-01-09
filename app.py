@@ -495,7 +495,7 @@ def get_networking():
 
 @app.route('/api/storage')
 def get_storage():
-    """Get list of all storage resources (Azure and AWS)"""
+    """Get list of all storage resources (Proxmox, Azure, and AWS)"""
     import sys
     sys.stderr.flush()
     sys.stdout.flush()
@@ -504,8 +504,26 @@ def get_storage():
         all_resources = {
             'storage_accounts': [],
             'containers': [],
-            'buckets': []
+            'buckets': [],
+            'storages': []
         }
+        
+        # Fetch Proxmox storage resources
+        sys.stderr.write("[Storage API] Attempting to fetch Proxmox storage...\n")
+        sys.stderr.flush()
+        try:
+            proxmox = get_proxmox_client()
+            proxmox_storage = proxmox.get_all_storage()
+            all_resources['storages'].extend(proxmox_storage.get('storages', []))
+            sys.stderr.write(f"[Storage API] Successfully fetched {len(proxmox_storage.get('storages', []))} Proxmox storage resources\n")
+            sys.stderr.flush()
+        except Exception as e:
+            import traceback
+            error_msg = f"[Storage API] Error: Failed to fetch Proxmox storage: {str(e)}"
+            traceback_str = traceback.format_exc()
+            sys.stderr.write(f"{error_msg}\n{traceback_str}\n")
+            sys.stderr.flush()
+            # Continue even if Proxmox fails
         
         # Fetch Azure storage resources
         sys.stderr.write(f"[Storage API] Attempting to fetch Azure storage (Azure available: {AZURE_AVAILABLE})...\n")
@@ -554,9 +572,9 @@ def get_storage():
         
         total_count = (
             len(all_resources['storage_accounts']) + len(all_resources['containers']) + 
-            len(all_resources['buckets'])
+            len(all_resources['buckets']) + len(all_resources['storages'])
         )
-        sys.stderr.write(f"[Storage API] Returning {total_count} total storage resources ({len(all_resources['storage_accounts'])} Storage Accounts, {len(all_resources['containers'])} Containers, {len(all_resources['buckets'])} Buckets)\n")
+        sys.stderr.write(f"[Storage API] Returning {total_count} total storage resources ({len(all_resources['storage_accounts'])} Storage Accounts, {len(all_resources['containers'])} Containers, {len(all_resources['buckets'])} Buckets, {len(all_resources['storages'])} Proxmox Storages)\n")
         sys.stderr.flush()
         return jsonify(all_resources), 200
     except Exception as e:
