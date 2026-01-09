@@ -143,41 +143,137 @@ class ProxmoxClient:
         all_vms = []
         
         try:
-            # Get all nodes
-            nodes = self._make_request('GET', '/nodes')
-            
-            for node in nodes:
-                node_name = node['node']
+            # Try to use /cluster/resources endpoint first (more efficient, includes tags)
+            try:
+                resources = self._make_request('GET', '/cluster/resources', {'type': 'vm'})
                 
-                try:
-                    # Get all VMs (QEMU/KVM) on this node
-                    vms = self._make_request('GET', f'/nodes/{node_name}/qemu')
+                # Build a map of VMID to tags from cluster resources
+                tags_map = {}
+                for resource in resources:
+                    if resource.get('type') == 'qemu':
+                        vmid = resource.get('vmid')
+                        if vmid:
+                            # Tags are stored as comma or semicolon-separated string
+                            tags_str = resource.get('tags', '')
+                            tags = []
+                            if tags_str:
+                                # Handle both comma and semicolon separators
+                                # Split by semicolon first, then by comma, and flatten
+                                tags = []
+                                for part in tags_str.split(';'):
+                                    if ',' in part:
+                                        tags.extend([tag.strip() for tag in part.split(',') if tag.strip()])
+                                    else:
+                                        tag = part.strip()
+                                        if tag:
+                                            tags.append(tag)
+                            tags_map[vmid] = tags
+                
+                # Now get detailed VM info from each node
+                nodes = self._make_request('GET', '/nodes')
+                
+                for node in nodes:
+                    node_name = node['node']
                     
-                    for vm in vms:
-                        # Filter out templates - templates have template=1
-                        if vm.get('template', 0) == 1:
-                            continue
+                    try:
+                        # Get all VMs (QEMU/KVM) on this node
+                        vms = self._make_request('GET', f'/nodes/{node_name}/qemu')
                         
-                        vm_info = {
-                            'vmid': vm.get('vmid'),
-                            'name': vm.get('name', ''),
-                            'status': vm.get('status', 'unknown'),
-                            'node': node_name,
-                            'cpu': vm.get('cpu', 0),
-                            'mem': vm.get('mem', 0),
-                            'maxmem': vm.get('maxmem', 0),
-                            'disk': vm.get('disk', 0),
-                            'maxdisk': vm.get('maxdisk', 0),
-                            'uptime': vm.get('uptime', 0)
-                        }
-                        all_vms.append(vm_info)
+                        for vm in vms:
+                            # Filter out templates - templates have template=1
+                            if vm.get('template', 0) == 1:
+                                continue
+                            
+                            vmid = vm.get('vmid')
+                            # Get tags from the map we built earlier
+                            tags = tags_map.get(vmid, [])
+                            
+                            vm_info = {
+                                'vmid': vmid,
+                                'name': vm.get('name', ''),
+                                'status': vm.get('status', 'unknown'),
+                                'node': node_name,
+                                'cpu': vm.get('cpu', 0),
+                                'mem': vm.get('mem', 0),
+                                'maxmem': vm.get('maxmem', 0),
+                                'disk': vm.get('disk', 0),
+                                'maxdisk': vm.get('maxdisk', 0),
+                                'uptime': vm.get('uptime', 0),
+                                'tags': tags
+                            }
+                            all_vms.append(vm_info)
+                    
+                    except Exception as e:
+                        # Log error but continue with other nodes
+                        print(f"Error fetching VMs from node {node_name}: {str(e)}")
+                        continue
                 
-                except Exception as e:
-                    # Log error but continue with other nodes
-                    print(f"Error fetching VMs from node {node_name}: {str(e)}")
-                    continue
+                return all_vms
             
-            return all_vms
+            except Exception as cluster_error:
+                # Fallback to the original method if cluster/resources doesn't work
+                print(f"Warning: Could not use /cluster/resources endpoint: {str(cluster_error)}")
+                print("Falling back to node-by-node method...")
+                
+                # Get all nodes
+                nodes = self._make_request('GET', '/nodes')
+                
+                for node in nodes:
+                    node_name = node['node']
+                    
+                    try:
+                        # Get all VMs (QEMU/KVM) on this node
+                        vms = self._make_request('GET', f'/nodes/{node_name}/qemu')
+                        
+                        for vm in vms:
+                            # Filter out templates - templates have template=1
+                            if vm.get('template', 0) == 1:
+                                continue
+                            
+                            vmid = vm.get('vmid')
+                            
+                            # Get VM config to fetch tags
+                            tags = []
+                            try:
+                                vm_config = self._make_request('GET', f'/nodes/{node_name}/qemu/{vmid}/config')
+                                # Tags are stored as comma or semicolon-separated string in the config
+                                tags_str = vm_config.get('tags', '')
+                                if tags_str:
+                                    # Handle both comma and semicolon separators
+                                    # Split by semicolon first, then by comma, and flatten
+                                    tags = []
+                                    for part in tags_str.split(';'):
+                                        if ',' in part:
+                                            tags.extend([tag.strip() for tag in part.split(',') if tag.strip()])
+                                        else:
+                                            tag = part.strip()
+                                            if tag:
+                                                tags.append(tag)
+                            except Exception as e:
+                                # If we can't get tags, continue without them
+                                print(f"Warning: Could not fetch tags for VM {vmid} on node {node_name}: {str(e)}")
+                            
+                            vm_info = {
+                                'vmid': vmid,
+                                'name': vm.get('name', ''),
+                                'status': vm.get('status', 'unknown'),
+                                'node': node_name,
+                                'cpu': vm.get('cpu', 0),
+                                'mem': vm.get('mem', 0),
+                                'maxmem': vm.get('maxmem', 0),
+                                'disk': vm.get('disk', 0),
+                                'maxdisk': vm.get('maxdisk', 0),
+                                'uptime': vm.get('uptime', 0),
+                                'tags': tags
+                            }
+                            all_vms.append(vm_info)
+                    
+                    except Exception as e:
+                        # Log error but continue with other nodes
+                        print(f"Error fetching VMs from node {node_name}: {str(e)}")
+                        continue
+                
+                return all_vms
         
         except Exception as e:
             raise Exception(f"Error fetching VMs from Proxmox: {str(e)}")
@@ -206,6 +302,20 @@ class ProxmoxClient:
                     # Get VM configuration
                     vm_config = self._make_request('GET', f'/nodes/{node_name}/qemu/{vmid}/config')
                     
+                    # Extract tags from config (tags are stored as comma or semicolon-separated string)
+                    tags = []
+                    tags_str = vm_config.get('tags', '')
+                    if tags_str:
+                        # Handle both comma and semicolon separators
+                        # Split by semicolon first, then by comma, and flatten
+                        for part in tags_str.split(';'):
+                            if ',' in part:
+                                tags.extend([tag.strip() for tag in part.split(',') if tag.strip()])
+                            else:
+                                tag = part.strip()
+                                if tag:
+                                    tags.append(tag)
+                    
                     # Combine status and config information
                     vm_details = {
                         'vmid': vmid,
@@ -224,7 +334,8 @@ class ProxmoxClient:
                         'diskwrite': vm_status.get('diskwrite', 0),
                         'cores': vm_config.get('cores', 1),
                         'sockets': vm_config.get('sockets', 1),
-                        'memory': vm_config.get('memory', 0)
+                        'memory': vm_config.get('memory', 0),
+                        'tags': tags
                     }
                     
                     return vm_details
