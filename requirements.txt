@@ -6,3 +6,4 @@ requests
 azure-identity
 azure-mgmt-compute
 azure-mgmt-resource
+boto3
