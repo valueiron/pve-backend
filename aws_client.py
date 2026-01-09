@@ -97,6 +97,44 @@ class AWSClient:
         
         return status_map.get(state_lower, 'unknown')
     
+    def _extract_tags(self, resource):
+        """
+        Extract tags from an AWS resource and convert to array format.
+        AWS tags are stored as an array of objects with 'Key' and 'Value' properties.
+        We return both key and value, excluding the 'Name' tag as it's already displayed separately.
+        
+        Args:
+            resource: AWS resource object/dictionary with Tags attribute
+            
+        Returns:
+            list: List of dictionaries with 'key' and 'value' for key-value pairs
+        """
+        tags = []
+        if isinstance(resource, dict):
+            # Resource is a dictionary (common case)
+            tags_list = resource.get('Tags', [])
+        elif hasattr(resource, 'tags'):
+            # Resource has a tags attribute
+            tags_list = resource.tags if isinstance(resource.tags, list) else []
+        else:
+            return tags
+        
+        for tag in tags_list:
+            if isinstance(tag, dict):
+                tag_key = tag.get('Key', '')
+                tag_value = tag.get('Value', '')
+                # Exclude 'Name' tag as it's already displayed separately
+                if tag_key and tag_key != 'Name':
+                    tags.append({'key': tag_key, 'value': tag_value})
+            elif hasattr(tag, 'key'):
+                # Tag is an object with key and value attributes
+                tag_key = tag.key if hasattr(tag, 'key') else ''
+                tag_value = tag.value if hasattr(tag, 'value') else ''
+                if tag_key and tag_key != 'Name':
+                    tags.append({'key': tag_key, 'value': tag_value})
+        
+        return tags
+    
     def _generate_instance_id(self, instance_id, region):
         """
         Generate a unique VM ID for AWS instances.
@@ -280,6 +318,9 @@ class AWSClient:
                                     # Normalize VM data to match Proxmox structure
                                     vm_id = self._generate_instance_id(instance_id, region)
                                     
+                                    # Extract tags
+                                    tags = self._extract_tags(instance)
+                                    
                                     vm_info = {
                                         'vmid': vm_id,
                                         'name': name,
@@ -295,7 +336,8 @@ class AWSClient:
                                         'region': region,
                                         'instance_id': instance_id,
                                         'instance_type': instance_type,
-                                        'availability_zone': availability_zone
+                                        'availability_zone': availability_zone,
+                                        'tags': tags
                                     }
                                     
                                     # Add network info if available
@@ -401,6 +443,9 @@ class AWSClient:
             instance_type = instance.get('InstanceType', 'unknown')
             availability_zone = instance.get('Placement', {}).get('AvailabilityZone', region)
             
+            # Extract tags
+            tags = self._extract_tags(instance)
+            
             # Build detailed VM info
             vm_details = {
                 'vmid': vm_id,
@@ -417,7 +462,8 @@ class AWSClient:
                 'region': region,
                 'instance_id': instance_id,
                 'instance_type': instance_type,
-                'availability_zone': availability_zone
+                'availability_zone': availability_zone,
+                'tags': tags
             }
             
             # Add network info
@@ -554,7 +600,8 @@ class AWSClient:
                                 'state': vpc.get('State', ''),
                                 'region': region,
                                 'type': 'aws',
-                                'resource_type': 'vpc'
+                                'resource_type': 'vpc',
+                                'tags': self._extract_tags(vpc)
                             }
                             # Get name from tags
                             for tag in vpc.get('Tags', []):
@@ -579,7 +626,8 @@ class AWSClient:
                                 'state': subnet.get('State', ''),
                                 'region': region,
                                 'type': 'aws',
-                                'resource_type': 'subnet'
+                                'resource_type': 'subnet',
+                                'tags': self._extract_tags(subnet)
                             }
                             # Get name from tags
                             for tag in subnet.get('Tags', []):
@@ -602,7 +650,8 @@ class AWSClient:
                                 'description': sg.get('Description', ''),
                                 'region': region,
                                 'type': 'aws',
-                                'resource_type': 'security_group'
+                                'resource_type': 'security_group',
+                                'tags': self._extract_tags(sg)
                             }
                             result['security_groups'].append(sg_info)
                     except Exception as e:
@@ -622,7 +671,8 @@ class AWSClient:
                                 'domain': eip.get('Domain', 'vpc'),
                                 'region': region,
                                 'type': 'aws',
-                                'resource_type': 'elastic_ip'
+                                'resource_type': 'elastic_ip',
+                                'tags': self._extract_tags(eip)
                             }
                             result['elastic_ips'].append(eip_info)
                     except Exception as e:
@@ -705,6 +755,18 @@ class AWSClient:
                         sys.stderr.write(f"[AWS get_all_storage] Could not get size info for bucket {bucket_name}: {str(e)}\n")
                         sys.stderr.flush()
                     
+                    # Get bucket tags
+                    tags = []
+                    try:
+                        # S3 bucket tags require a separate API call
+                        bucket_tagging = s3_client.get_bucket_tagging(Bucket=bucket_name)
+                        if 'TagSet' in bucket_tagging:
+                            tags = [tag.get('Key', '') for tag in bucket_tagging['TagSet'] if tag.get('Key') and tag.get('Key') != 'Name']
+                    except Exception as e:
+                        # Bucket might not have tags or we might not have permission
+                        # This is not critical, so we continue
+                        pass
+                    
                     bucket_info = {
                         'id': bucket_name,
                         'name': bucket_name,
@@ -713,7 +775,8 @@ class AWSClient:
                         'size_bytes': size_bytes,
                         'object_count': object_count,
                         'type': 'aws',
-                        'resource_type': 's3_bucket'
+                        'resource_type': 's3_bucket',
+                        'tags': tags
                     }
                     
                     result['buckets'].append(bucket_info)
