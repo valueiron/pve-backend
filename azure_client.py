@@ -7,6 +7,7 @@ from azure.identity import ClientSecretCredential
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.resource import ResourceManagementClient
 from azure.mgmt.network import NetworkManagementClient
+from azure.mgmt.storage import StorageManagementClient
 from azure.core.exceptions import AzureError
 from dotenv import load_dotenv
 from datetime import datetime, timezone
@@ -61,6 +62,12 @@ class AzureClient:
         
         # Create network management client
         self.network_client = NetworkManagementClient(
+            self.credential,
+            self.subscription_id if self.subscription_id else None
+        )
+        
+        # Create storage management client
+        self.storage_client = StorageManagementClient(
             self.credential,
             self.subscription_id if self.subscription_id else None
         )
@@ -697,6 +704,138 @@ class AzureClient:
         except Exception as e:
             import traceback
             error_msg = f"Error fetching networking resources from Azure: {str(e)}"
+            sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
+            sys.stderr.flush()
+            raise Exception(error_msg)
+    
+    def get_all_storage(self):
+        """
+        Fetch all Blob Storage accounts and containers.
+        
+        Returns:
+            dict: Dictionary containing lists of storage accounts and containers
+        """
+        import sys
+        sys.stderr.write("[Azure get_all_storage] Starting storage fetch...\n")
+        sys.stderr.flush()
+        
+        result = {
+            'storage_accounts': [],
+            'containers': []
+        }
+        
+        try:
+            subscriptions = []
+            
+            if self.subscription_id:
+                subscriptions = [self.subscription_id]
+            else:
+                try:
+                    subscription_list = self.resource_client.subscriptions.list()
+                    subscriptions = [sub.subscription_id for sub in subscription_list]
+                except Exception as e:
+                    sys.stderr.write(f"[Azure get_all_storage] Error listing subscriptions: {str(e)}\n")
+                    sys.stderr.flush()
+                    return result
+            
+            for subscription_id in subscriptions:
+                try:
+                    storage_client = StorageManagementClient(self.credential, subscription_id)
+                    resource_client = ResourceManagementClient(self.credential, subscription_id)
+                    
+                    # Get all resource groups
+                    resource_groups = resource_client.resource_groups.list()
+                    
+                    for rg in resource_groups:
+                        rg_name = rg.name
+                        
+                        try:
+                            # Get Storage Accounts
+                            storage_accounts = storage_client.storage_accounts.list_by_resource_group(rg_name)
+                            
+                            for account in storage_accounts:
+                                # Only process accounts with BlobStorage or StorageV2 kind
+                                if account.kind not in ['BlobStorage', 'StorageV2', 'Storage']:
+                                    continue
+                                
+                                account_info = {
+                                    'id': account.id,
+                                    'name': account.name,
+                                    'resource_group': rg_name,
+                                    'location': account.location,
+                                    'kind': account.kind,
+                                    'sku': account.sku.name if account.sku else None,
+                                    'subscription_id': subscription_id,
+                                    'type': 'azure',
+                                    'resource_type': 'storage_account'
+                                }
+                                
+                                # Get primary endpoints
+                                if account.primary_endpoints:
+                                    account_info['primary_blob_endpoint'] = account.primary_endpoints.blob
+                                    account_info['primary_file_endpoint'] = account.primary_endpoints.file
+                                
+                                result['storage_accounts'].append(account_info)
+                                
+                                # Get containers for this storage account
+                                try:
+                                    # Get storage account keys
+                                    keys = storage_client.storage_accounts.list_keys(rg_name, account.name)
+                                    if keys.keys:
+                                        # Use the first key to access blob service
+                                        from azure.storage.blob import BlobServiceClient
+                                        
+                                        account_key = keys.keys[0].value
+                                        connection_string = f"DefaultEndpointsProtocol=https;AccountName={account.name};AccountKey={account_key};EndpointSuffix=core.windows.net"
+                                        
+                                        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+                                        
+                                        # List containers
+                                        containers = blob_service_client.list_containers()
+                                        for container in containers:
+                                            container_info = {
+                                                'id': f"{account.name}/{container.name}",
+                                                'name': container.name,
+                                                'storage_account': account.name,
+                                                'resource_group': rg_name,
+                                                'public_access': container.public_access or 'None',
+                                                'subscription_id': subscription_id,
+                                                'type': 'azure',
+                                                'resource_type': 'blob_container'
+                                            }
+                                            
+                                            # Get container properties for metadata
+                                            try:
+                                                container_client = blob_service_client.get_container_client(container.name)
+                                                properties = container_client.get_container_properties()
+                                                container_info['last_modified'] = properties.last_modified.isoformat() if properties.last_modified else None
+                                            except:
+                                                pass
+                                            
+                                            result['containers'].append(container_info)
+                                
+                                except Exception as e:
+                                    sys.stderr.write(f"[Azure get_all_storage] Error fetching containers for {account.name}: {str(e)}\n")
+                                    sys.stderr.flush()
+                                    continue
+                        
+                        except Exception as e:
+                            sys.stderr.write(f"[Azure get_all_storage] Error processing RG {rg_name}: {str(e)}\n")
+                            sys.stderr.flush()
+                            continue
+                
+                except Exception as e:
+                    sys.stderr.write(f"[Azure get_all_storage] Error processing subscription {subscription_id}: {str(e)}\n")
+                    sys.stderr.flush()
+                    continue
+            
+            sys.stderr.write(f"[Azure get_all_storage] Found {len(result['storage_accounts'])} Storage Accounts, {len(result['containers'])} Containers\n")
+            sys.stderr.flush()
+            return result
+        
+        except Exception as e:
+            import traceback
+            error_msg = f"Error fetching storage resources from Azure: {str(e)}"
             sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
             sys.stderr.flush()
             raise Exception(error_msg)

@@ -493,6 +493,79 @@ def get_networking():
         sys.stderr.flush()
         return jsonify({"error": f"Failed to fetch networking resources: {str(e)}"}), 500
 
+@app.route('/api/storage')
+def get_storage():
+    """Get list of all storage resources (Azure and AWS)"""
+    import sys
+    sys.stderr.flush()
+    sys.stdout.flush()
+    
+    try:
+        all_resources = {
+            'storage_accounts': [],
+            'containers': [],
+            'buckets': []
+        }
+        
+        # Fetch Azure storage resources
+        sys.stderr.write(f"[Storage API] Attempting to fetch Azure storage (Azure available: {AZURE_AVAILABLE})...\n")
+        sys.stderr.flush()
+        try:
+            azure = get_azure_client()
+            if azure:
+                sys.stderr.write("[Storage API] Azure client is available, fetching storage resources...\n")
+                sys.stderr.flush()
+                azure_storage = azure.get_all_storage()
+                all_resources['storage_accounts'].extend(azure_storage.get('storage_accounts', []))
+                all_resources['containers'].extend(azure_storage.get('containers', []))
+                sys.stderr.write(f"[Storage API] Successfully fetched Azure storage resources\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write("[Storage API] Azure client not available\n")
+                sys.stderr.flush()
+        except Exception as e:
+            import traceback
+            error_msg = f"[Storage API] Error: Failed to fetch Azure storage: {str(e)}"
+            traceback_str = traceback.format_exc()
+            sys.stderr.write(f"{error_msg}\n{traceback_str}\n")
+            sys.stderr.flush()
+        
+        # Fetch AWS storage resources
+        sys.stderr.write(f"[Storage API] Attempting to fetch AWS storage (AWS available: {AWS_AVAILABLE})...\n")
+        sys.stderr.flush()
+        try:
+            aws = get_aws_client()
+            if aws:
+                sys.stderr.write("[Storage API] AWS client is available, fetching storage resources...\n")
+                sys.stderr.flush()
+                aws_storage = aws.get_all_storage()
+                all_resources['buckets'].extend(aws_storage.get('buckets', []))
+                sys.stderr.write(f"[Storage API] Successfully fetched AWS storage resources\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write("[Storage API] AWS client not available\n")
+                sys.stderr.flush()
+        except Exception as e:
+            import traceback
+            error_msg = f"[Storage API] Error: Failed to fetch AWS storage: {str(e)}"
+            traceback_str = traceback.format_exc()
+            sys.stderr.write(f"{error_msg}\n{traceback_str}\n")
+            sys.stderr.flush()
+        
+        total_count = (
+            len(all_resources['storage_accounts']) + len(all_resources['containers']) + 
+            len(all_resources['buckets'])
+        )
+        sys.stderr.write(f"[Storage API] Returning {total_count} total storage resources ({len(all_resources['storage_accounts'])} Storage Accounts, {len(all_resources['containers'])} Containers, {len(all_resources['buckets'])} Buckets)\n")
+        sys.stderr.flush()
+        return jsonify(all_resources), 200
+    except Exception as e:
+        import sys
+        import traceback
+        sys.stderr.write(f"[Storage API] Fatal error: {str(e)}\n{traceback.format_exc()}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"Failed to fetch storage resources: {str(e)}"}), 500
+
 if __name__ == '__main__':
     # Start Flask server
     print("Starting Flask server on port 5000...")
