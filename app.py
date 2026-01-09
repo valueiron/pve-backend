@@ -409,6 +409,90 @@ def shutdown_vm(vmid):
     except Exception as e:
         return jsonify({"error": f"Failed to shutdown VM {vmid}: {str(e)}"}), 500
 
+@app.route('/api/networking')
+def get_networking():
+    """Get list of all networking resources (Azure and AWS)"""
+    import sys
+    sys.stderr.flush()
+    sys.stdout.flush()
+    
+    try:
+        all_resources = {
+            'vnets': [],
+            'subnets': [],
+            'nsgs': [],
+            'public_ips': [],
+            'vpcs': [],
+            'security_groups': [],
+            'elastic_ips': []
+        }
+        
+        # Fetch Azure networking resources
+        sys.stderr.write(f"[Networking API] Attempting to fetch Azure networking (Azure available: {AZURE_AVAILABLE})...\n")
+        sys.stderr.flush()
+        try:
+            azure = get_azure_client()
+            if azure:
+                sys.stderr.write("[Networking API] Azure client is available, fetching networking resources...\n")
+                sys.stderr.flush()
+                azure_networking = azure.get_all_networking()
+                all_resources['vnets'].extend(azure_networking.get('vnets', []))
+                all_resources['subnets'].extend(azure_networking.get('subnets', []))
+                all_resources['nsgs'].extend(azure_networking.get('nsgs', []))
+                all_resources['public_ips'].extend(azure_networking.get('public_ips', []))
+                sys.stderr.write(f"[Networking API] Successfully fetched Azure networking resources\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write("[Networking API] Azure client not available\n")
+                sys.stderr.flush()
+        except Exception as e:
+            import traceback
+            error_msg = f"[Networking API] Error: Failed to fetch Azure networking: {str(e)}"
+            traceback_str = traceback.format_exc()
+            sys.stderr.write(f"{error_msg}\n{traceback_str}\n")
+            sys.stderr.flush()
+        
+        # Fetch AWS networking resources
+        sys.stderr.write(f"[Networking API] Attempting to fetch AWS networking (AWS available: {AWS_AVAILABLE})...\n")
+        sys.stderr.flush()
+        try:
+            aws = get_aws_client()
+            if aws:
+                sys.stderr.write("[Networking API] AWS client is available, fetching networking resources...\n")
+                sys.stderr.flush()
+                aws_networking = aws.get_all_networking()
+                all_resources['vpcs'].extend(aws_networking.get('vpcs', []))
+                all_resources['subnets'].extend(aws_networking.get('subnets', []))
+                all_resources['security_groups'].extend(aws_networking.get('security_groups', []))
+                all_resources['elastic_ips'].extend(aws_networking.get('elastic_ips', []))
+                sys.stderr.write(f"[Networking API] Successfully fetched AWS networking resources\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write("[Networking API] AWS client not available\n")
+                sys.stderr.flush()
+        except Exception as e:
+            import traceback
+            error_msg = f"[Networking API] Error: Failed to fetch AWS networking: {str(e)}"
+            traceback_str = traceback.format_exc()
+            sys.stderr.write(f"{error_msg}\n{traceback_str}\n")
+            sys.stderr.flush()
+        
+        total_count = (
+            len(all_resources['vnets']) + len(all_resources['subnets']) + 
+            len(all_resources['nsgs']) + len(all_resources['public_ips']) +
+            len(all_resources['vpcs']) + len(all_resources['security_groups']) + 
+            len(all_resources['elastic_ips'])
+        )
+        sys.stderr.write(f"[Networking API] Returning {total_count} total networking resources\n")
+        sys.stderr.flush()
+        return jsonify(all_resources), 200
+    except Exception as e:
+        import sys
+        import traceback
+        sys.stderr.write(f"[Networking API] Fatal error: {str(e)}\n{traceback.format_exc()}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"Failed to fetch networking resources: {str(e)}"}), 500
+
 if __name__ == '__main__':
     # Start Flask server
     print("Starting Flask server on port 5000...")
