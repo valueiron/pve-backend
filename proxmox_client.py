@@ -254,6 +254,71 @@ class ProxmoxClient:
         except Exception as e:
             raise Exception(f"Error fetching nodes: {str(e)}")
     
+    def get_all_storage(self):
+        """
+        Fetch all storage from all nodes in the Proxmox cluster.
+        
+        Returns:
+            dict: Dictionary containing list of storage resources
+        """
+        result = {
+            'storages': []
+        }
+        
+        try:
+            # Get all nodes
+            nodes = self._make_request('GET', '/nodes')
+            
+            for node in nodes:
+                node_name = node['node']
+                
+                try:
+                    # Get storage information from this node
+                    storages = self._make_request('GET', f'/nodes/{node_name}/storage')
+                    
+                    for storage in storages:
+                        # Extract storage information
+                        storage_name = storage.get('storage', '')
+                        storage_type = storage.get('type', 'unknown')
+                        content = storage.get('content', '')
+                        total = storage.get('total', 0)  # Total space in bytes
+                        used = storage.get('used', 0)    # Used space in bytes
+                        avail = storage.get('avail', 0)  # Available space in bytes
+                        active = storage.get('active', 0)  # 1 if active, 0 if not
+                        enabled = storage.get('enabled', 1)  # 1 if enabled, 0 if not
+                        
+                        # Create storage info dictionary
+                        storage_info = {
+                            'id': f"{node_name}/{storage_name}",
+                            'name': storage_name,
+                            'node': node_name,
+                            'type': 'proxmox',
+                            'resource_type': 'proxmox_storage',
+                            'storage_type': storage_type,  # dir, lvm, lvm-thin, zfspool, nfs, cifs, etc.
+                            'content': content,  # images, iso, vztmpl, etc.
+                            'total_bytes': total,
+                            'used_bytes': used,
+                            'avail_bytes': avail,
+                            'active': active == 1,
+                            'enabled': enabled == 1
+                        }
+                        
+                        # Only add if not already in the list (storage can be shared across nodes)
+                        # Check if this storage already exists
+                        existing = next((s for s in result['storages'] if s['name'] == storage_name and s['node'] == node_name), None)
+                        if not existing:
+                            result['storages'].append(storage_info)
+                
+                except Exception as e:
+                    # Log error but continue with other nodes
+                    print(f"Error fetching storage from node {node_name}: {str(e)}")
+                    continue
+            
+            return result
+        
+        except Exception as e:
+            raise Exception(f"Error fetching storage from Proxmox: {str(e)}")
+    
     def _find_vm_node(self, vmid):
         """
         Find which node a VM is running on.
