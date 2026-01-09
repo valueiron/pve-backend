@@ -511,6 +511,139 @@ class AWSClient:
             raise
         except Exception as e:
             raise Exception(f"Error stopping instance {vm_id}: {str(e)}")
+    
+    def get_all_networking(self):
+        """
+        Fetch all networking resources (VPCs, Subnets, Security Groups, Elastic IPs).
+        
+        Returns:
+            dict: Dictionary containing lists of networking resources
+        """
+        sys.stderr.write("[AWS get_all_networking] Starting networking fetch...\n")
+        sys.stderr.flush()
+        
+        result = {
+            'vpcs': [],
+            'subnets': [],
+            'security_groups': [],
+            'elastic_ips': []
+        }
+        
+        try:
+            # Determine which regions to search
+            if self.region:
+                regions = [self.region]
+            else:
+                regions = self._get_all_regions()
+            
+            for region in regions:
+                try:
+                    sys.stderr.write(f"[AWS get_all_networking] Processing region: {region}\n")
+                    sys.stderr.flush()
+                    
+                    ec2_client = self.session.client('ec2', region_name=region)
+                    
+                    # Get VPCs
+                    try:
+                        vpcs = ec2_client.describe_vpcs()
+                        for vpc in vpcs.get('Vpcs', []):
+                            vpc_info = {
+                                'id': vpc['VpcId'],
+                                'name': None,
+                                'cidr_block': vpc.get('CidrBlock', ''),
+                                'state': vpc.get('State', ''),
+                                'region': region,
+                                'type': 'aws',
+                                'resource_type': 'vpc'
+                            }
+                            # Get name from tags
+                            for tag in vpc.get('Tags', []):
+                                if tag.get('Key') == 'Name':
+                                    vpc_info['name'] = tag.get('Value')
+                                    break
+                            result['vpcs'].append(vpc_info)
+                    except Exception as e:
+                        sys.stderr.write(f"[AWS get_all_networking] Error fetching VPCs in {region}: {str(e)}\n")
+                        sys.stderr.flush()
+                    
+                    # Get Subnets
+                    try:
+                        subnets = ec2_client.describe_subnets()
+                        for subnet in subnets.get('Subnets', []):
+                            subnet_info = {
+                                'id': subnet['SubnetId'],
+                                'name': None,
+                                'vpc_id': subnet.get('VpcId', ''),
+                                'cidr_block': subnet.get('CidrBlock', ''),
+                                'availability_zone': subnet.get('AvailabilityZone', ''),
+                                'state': subnet.get('State', ''),
+                                'region': region,
+                                'type': 'aws',
+                                'resource_type': 'subnet'
+                            }
+                            # Get name from tags
+                            for tag in subnet.get('Tags', []):
+                                if tag.get('Key') == 'Name':
+                                    subnet_info['name'] = tag.get('Value')
+                                    break
+                            result['subnets'].append(subnet_info)
+                    except Exception as e:
+                        sys.stderr.write(f"[AWS get_all_networking] Error fetching Subnets in {region}: {str(e)}\n")
+                        sys.stderr.flush()
+                    
+                    # Get Security Groups
+                    try:
+                        security_groups = ec2_client.describe_security_groups()
+                        for sg in security_groups.get('SecurityGroups', []):
+                            sg_info = {
+                                'id': sg['GroupId'],
+                                'name': sg.get('GroupName', ''),
+                                'vpc_id': sg.get('VpcId', ''),
+                                'description': sg.get('Description', ''),
+                                'region': region,
+                                'type': 'aws',
+                                'resource_type': 'security_group'
+                            }
+                            result['security_groups'].append(sg_info)
+                    except Exception as e:
+                        sys.stderr.write(f"[AWS get_all_networking] Error fetching Security Groups in {region}: {str(e)}\n")
+                        sys.stderr.flush()
+                    
+                    # Get Elastic IPs
+                    try:
+                        elastic_ips = ec2_client.describe_addresses()
+                        for eip in elastic_ips.get('Addresses', []):
+                            eip_info = {
+                                'id': eip.get('AllocationId', eip.get('PublicIp', '')),
+                                'name': None,
+                                'public_ip': eip.get('PublicIp', ''),
+                                'private_ip': eip.get('PrivateIpAddress', ''),
+                                'instance_id': eip.get('InstanceId', ''),
+                                'domain': eip.get('Domain', 'vpc'),
+                                'region': region,
+                                'type': 'aws',
+                                'resource_type': 'elastic_ip'
+                            }
+                            result['elastic_ips'].append(eip_info)
+                    except Exception as e:
+                        sys.stderr.write(f"[AWS get_all_networking] Error fetching Elastic IPs in {region}: {str(e)}\n")
+                        sys.stderr.flush()
+                
+                except Exception as e:
+                    sys.stderr.write(f"[AWS get_all_networking] Error processing region {region}: {str(e)}\n")
+                    sys.stderr.flush()
+                    continue
+            
+            sys.stderr.write(f"[AWS get_all_networking] Found {len(result['vpcs'])} VPCs, {len(result['subnets'])} Subnets, {len(result['security_groups'])} Security Groups, {len(result['elastic_ips'])} Elastic IPs\n")
+            sys.stderr.flush()
+            return result
+        
+        except Exception as e:
+            import traceback
+            error_msg = f"Error fetching networking resources from AWS: {str(e)}"
+            sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
+            sys.stderr.flush()
+            raise Exception(error_msg)
 
 # Global instance (lazy initialization)
 _aws_client = None

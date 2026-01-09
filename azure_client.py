@@ -6,6 +6,7 @@ import os
 from azure.identity import ClientSecretCredential
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.network import NetworkManagementClient
 from azure.core.exceptions import AzureError
 from dotenv import load_dotenv
 from datetime import datetime, timezone
@@ -54,6 +55,12 @@ class AzureClient:
         
         # Create resource management client for listing subscriptions
         self.resource_client = ResourceManagementClient(
+            self.credential,
+            self.subscription_id if self.subscription_id else None
+        )
+        
+        # Create network management client
+        self.network_client = NetworkManagementClient(
             self.credential,
             self.subscription_id if self.subscription_id else None
         )
@@ -563,6 +570,136 @@ class AzureClient:
             raise
         except Exception as e:
             raise Exception(f"Error stopping VM {vm_id}: {str(e)}")
+    
+    def get_all_networking(self):
+        """
+        Fetch all networking resources (VNets, Subnets, NSGs, Public IPs).
+        
+        Returns:
+            dict: Dictionary containing lists of networking resources
+        """
+        import sys
+        sys.stderr.write("[Azure get_all_networking] Starting networking fetch...\n")
+        sys.stderr.flush()
+        
+        result = {
+            'vnets': [],
+            'subnets': [],
+            'nsgs': [],
+            'public_ips': []
+        }
+        
+        try:
+            subscriptions = []
+            
+            if self.subscription_id:
+                subscriptions = [self.subscription_id]
+            else:
+                try:
+                    subscription_list = self.resource_client.subscriptions.list()
+                    subscriptions = [sub.subscription_id for sub in subscription_list]
+                except Exception as e:
+                    sys.stderr.write(f"[Azure get_all_networking] Error listing subscriptions: {str(e)}\n")
+                    sys.stderr.flush()
+                    return result
+            
+            for subscription_id in subscriptions:
+                try:
+                    network_client = NetworkManagementClient(self.credential, subscription_id)
+                    resource_client = ResourceManagementClient(self.credential, subscription_id)
+                    
+                    # Get all resource groups
+                    resource_groups = resource_client.resource_groups.list()
+                    
+                    for rg in resource_groups:
+                        rg_name = rg.name
+                        
+                        try:
+                            # Get Virtual Networks
+                            vnets = network_client.virtual_networks.list(rg_name)
+                            for vnet in vnets:
+                                address_space = []
+                                if vnet.address_space and vnet.address_space.address_prefixes:
+                                    address_space = list(vnet.address_space.address_prefixes)
+                                
+                                vnet_info = {
+                                    'id': vnet.id,
+                                    'name': vnet.name,
+                                    'resource_group': rg_name,
+                                    'location': vnet.location,
+                                    'address_space': address_space,
+                                    'subscription_id': subscription_id,
+                                    'type': 'azure',
+                                    'resource_type': 'vnet'
+                                }
+                                result['vnets'].append(vnet_info)
+                            
+                            # Get Subnets
+                            for vnet in network_client.virtual_networks.list(rg_name):
+                                subnets = network_client.subnets.list(rg_name, vnet.name)
+                                for subnet in subnets:
+                                    subnet_info = {
+                                        'id': subnet.id,
+                                        'name': subnet.name,
+                                        'vnet_name': vnet.name,
+                                        'resource_group': rg_name,
+                                        'address_prefix': subnet.address_prefix,
+                                        'subscription_id': subscription_id,
+                                        'type': 'azure',
+                                        'resource_type': 'subnet'
+                                    }
+                                    result['subnets'].append(subnet_info)
+                            
+                            # Get Network Security Groups
+                            nsgs = network_client.network_security_groups.list(rg_name)
+                            for nsg in nsgs:
+                                nsg_info = {
+                                    'id': nsg.id,
+                                    'name': nsg.name,
+                                    'resource_group': rg_name,
+                                    'location': nsg.location,
+                                    'subscription_id': subscription_id,
+                                    'type': 'azure',
+                                    'resource_type': 'nsg'
+                                }
+                                result['nsgs'].append(nsg_info)
+                            
+                            # Get Public IP Addresses
+                            public_ips = network_client.public_ip_addresses.list(rg_name)
+                            for pip in public_ips:
+                                pip_info = {
+                                    'id': pip.id,
+                                    'name': pip.name,
+                                    'resource_group': rg_name,
+                                    'location': pip.location,
+                                    'ip_address': pip.ip_address if hasattr(pip, 'ip_address') else None,
+                                    'allocation_method': pip.public_ip_allocation_method.value if hasattr(pip, 'public_ip_allocation_method') and pip.public_ip_allocation_method else None,
+                                    'subscription_id': subscription_id,
+                                    'type': 'azure',
+                                    'resource_type': 'public_ip'
+                                }
+                                result['public_ips'].append(pip_info)
+                        
+                        except Exception as e:
+                            sys.stderr.write(f"[Azure get_all_networking] Error processing RG {rg_name}: {str(e)}\n")
+                            sys.stderr.flush()
+                            continue
+                
+                except Exception as e:
+                    sys.stderr.write(f"[Azure get_all_networking] Error processing subscription {subscription_id}: {str(e)}\n")
+                    sys.stderr.flush()
+                    continue
+            
+            sys.stderr.write(f"[Azure get_all_networking] Found {len(result['vnets'])} VNets, {len(result['subnets'])} Subnets, {len(result['nsgs'])} NSGs, {len(result['public_ips'])} Public IPs\n")
+            sys.stderr.flush()
+            return result
+        
+        except Exception as e:
+            import traceback
+            error_msg = f"Error fetching networking resources from Azure: {str(e)}"
+            sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
+            sys.stderr.flush()
+            raise Exception(error_msg)
 
 # Global instance (lazy initialization)
 _azure_client = None
