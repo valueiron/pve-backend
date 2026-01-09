@@ -28,6 +28,29 @@ except Exception as e:
     def get_azure_client():
         return None
 
+# Import AWS client with error handling
+try:
+    from aws_client import get_aws_client
+    AWS_AVAILABLE = True
+    import sys
+    sys.stderr.write("[App] AWS client module imported successfully\n")
+    sys.stderr.flush()
+except ImportError as e:
+    AWS_AVAILABLE = False
+    import sys
+    sys.stderr.write(f"[App] WARNING: AWS client module not available: {str(e)}\n")
+    sys.stderr.write("[App] AWS features will be disabled. Install boto3\n")
+    sys.stderr.flush()
+    def get_aws_client():
+        return None
+except Exception as e:
+    AWS_AVAILABLE = False
+    import sys
+    sys.stderr.write(f"[App] WARNING: Error importing AWS client: {str(e)}\n")
+    sys.stderr.flush()
+    def get_aws_client():
+        return None
+
 app = Flask(__name__)
 # Enable CORS for all routes to allow pve-portal frontend to make requests
 # Allow requests from any origin (you can restrict this in production)
@@ -72,7 +95,7 @@ def metrics():
 
 @app.route('/api/vms')
 def get_vms():
-    """Get list of all VMs across all nodes (Proxmox and Azure)"""
+    """Get list of all VMs across all nodes (Proxmox, Azure, and AWS)"""
     import sys
     sys.stderr.flush()
     sys.stdout.flush()
@@ -125,7 +148,40 @@ def get_vms():
             sys.stderr.flush()
             # Continue even if Azure fails
         
-        sys.stderr.write(f"[VM API] Returning {len(all_vms)} total VMs ({len([v for v in all_vms if v.get('type') == 'proxmox'])} Proxmox, {len([v for v in all_vms if v.get('type') == 'azure'])} Azure)\n")
+        # Fetch AWS EC2 instances
+        sys.stderr.write(f"[VM API] Attempting to fetch AWS instances (AWS available: {AWS_AVAILABLE})...\n")
+        sys.stderr.flush()
+        try:
+            sys.stderr.write("[VM API] Calling get_aws_client()...\n")
+            sys.stderr.flush()
+            aws = get_aws_client()
+            sys.stderr.write(f"[VM API] get_aws_client() returned: {aws is not None}\n")
+            sys.stderr.flush()
+            
+            if aws:
+                sys.stderr.write("[VM API] AWS client is available, fetching instances...\n")
+                sys.stderr.flush()
+                aws_vms = aws.get_all_vms()
+                # Type field already added in aws_client
+                all_vms.extend(aws_vms)
+                sys.stderr.write(f"[VM API] Successfully fetched {len(aws_vms)} AWS instances\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write("[VM API] AWS client not available - credentials may not be configured\n")
+                sys.stderr.write("[VM API] Check /api/aws/status endpoint for diagnostic information\n")
+                sys.stderr.flush()
+        except Exception as e:
+            import traceback
+            error_msg = f"[VM API] Error: Failed to fetch AWS instances: {str(e)}"
+            traceback_str = traceback.format_exc()
+            sys.stderr.write(f"{error_msg}\n{traceback_str}\n")
+            sys.stderr.flush()
+            # Continue even if AWS fails
+        
+        proxmox_count = len([v for v in all_vms if v.get('type') == 'proxmox'])
+        azure_count = len([v for v in all_vms if v.get('type') == 'azure'])
+        aws_count = len([v for v in all_vms if v.get('type') == 'aws'])
+        sys.stderr.write(f"[VM API] Returning {len(all_vms)} total VMs ({proxmox_count} Proxmox, {azure_count} Azure, {aws_count} AWS)\n")
         sys.stderr.flush()
         return jsonify({"vms": all_vms}), 200
     except Exception as e:
@@ -137,7 +193,7 @@ def get_vms():
 
 @app.route('/api/vms/<vmid>')
 def get_vm_details(vmid):
-    """Get detailed information about a specific VM (Proxmox or Azure)"""
+    """Get detailed information about a specific VM (Proxmox, Azure, or AWS)"""
     try:
         # Check if this is an Azure VM (starts with 'azure-')
         if isinstance(vmid, str) and vmid.startswith('azure-'):
@@ -145,6 +201,13 @@ def get_vm_details(vmid):
             if not azure:
                 return jsonify({"error": "Azure client not available"}), 503
             vm_details = azure.get_vm_details(vmid)
+            return jsonify(vm_details), 200
+        # Check if this is an AWS instance (starts with 'aws-')
+        elif isinstance(vmid, str) and vmid.startswith('aws-'):
+            aws = get_aws_client()
+            if not aws:
+                return jsonify({"error": "AWS client not available"}), 503
+            vm_details = aws.get_vm_details(vmid)
             return jsonify(vm_details), 200
         else:
             # Proxmox VM (numeric ID)
@@ -228,9 +291,61 @@ def azure_status():
             "traceback": traceback.format_exc()
         }), 500
 
+@app.route('/api/aws/status')
+def aws_status():
+    """Diagnostic endpoint to check AWS client status"""
+    try:
+        import os
+        from aws_client import get_aws_client
+        
+        # Check environment variables
+        env_status = {
+            'AWS_ACCESS_KEY_ID': 'SET' if os.getenv('AWS_ACCESS_KEY_ID') else 'NOT SET',
+            'AWS_SECRET_ACCESS_KEY': 'SET' if os.getenv('AWS_SECRET_ACCESS_KEY') else 'NOT SET',
+            'AWS_REGION': os.getenv('AWS_REGION') or 'NOT SET (will search all regions)',
+            'AWS_SESSION_TOKEN': 'SET' if os.getenv('AWS_SESSION_TOKEN') else 'NOT SET (optional)'
+        }
+        
+        # Try to get AWS client
+        aws = get_aws_client()
+        if aws:
+            # Try to list regions as a test
+            try:
+                regions = aws._get_all_regions()
+                
+                return jsonify({
+                    "status": "connected",
+                    "message": "AWS client is initialized and working",
+                    "environment_variables": env_status,
+                    "regions_available": len(regions),
+                    "regions": regions[:10]  # Limit to first 10
+                }), 200
+            except Exception as e:
+                import traceback
+                return jsonify({
+                    "status": "error",
+                    "message": f"AWS client initialized but failed to list regions: {str(e)}",
+                    "environment_variables": env_status,
+                    "error_details": str(e),
+                    "traceback": traceback.format_exc()
+                }), 200
+        else:
+            return jsonify({
+                "status": "not_configured",
+                "message": "AWS client is not available - credentials may be missing or invalid",
+                "environment_variables": env_status
+            }), 200
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "status": "error",
+            "message": f"Error checking AWS status: {str(e)}",
+            "traceback": traceback.format_exc()
+        }), 500
+
 @app.route('/api/vms/<vmid>/start', methods=['POST'])
 def start_vm(vmid):
-    """Start a virtual machine (Proxmox or Azure)"""
+    """Start a virtual machine (Proxmox, Azure, or AWS)"""
     try:
         # Check if this is an Azure VM (starts with 'azure-')
         if isinstance(vmid, str) and vmid.startswith('azure-'):
@@ -238,6 +353,13 @@ def start_vm(vmid):
             if not azure:
                 return jsonify({"error": "Azure client not available"}), 503
             result = azure.start_vm(vmid)
+            return jsonify({"message": f"VM {vmid} started successfully", "data": result}), 200
+        # Check if this is an AWS instance (starts with 'aws-')
+        elif isinstance(vmid, str) and vmid.startswith('aws-'):
+            aws = get_aws_client()
+            if not aws:
+                return jsonify({"error": "AWS client not available"}), 503
+            result = aws.start_vm(vmid)
             return jsonify({"message": f"VM {vmid} started successfully", "data": result}), 200
         else:
             # Proxmox VM (numeric ID)
@@ -256,7 +378,7 @@ def start_vm(vmid):
 
 @app.route('/api/vms/<vmid>/shutdown', methods=['POST'])
 def shutdown_vm(vmid):
-    """Shutdown a virtual machine gracefully (Proxmox or Azure)"""
+    """Shutdown a virtual machine gracefully (Proxmox, Azure, or AWS)"""
     try:
         # Check if this is an Azure VM (starts with 'azure-')
         if isinstance(vmid, str) and vmid.startswith('azure-'):
@@ -264,6 +386,13 @@ def shutdown_vm(vmid):
             if not azure:
                 return jsonify({"error": "Azure client not available"}), 503
             result = azure.stop_vm(vmid)
+            return jsonify({"message": f"VM {vmid} shutdown initiated", "data": result}), 200
+        # Check if this is an AWS instance (starts with 'aws-')
+        elif isinstance(vmid, str) and vmid.startswith('aws-'):
+            aws = get_aws_client()
+            if not aws:
+                return jsonify({"error": "AWS client not available"}), 503
+            result = aws.stop_vm(vmid)
             return jsonify({"message": f"VM {vmid} shutdown initiated", "data": result}), 200
         else:
             # Proxmox VM (numeric ID)
