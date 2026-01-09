@@ -644,6 +644,95 @@ class AWSClient:
             sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
             sys.stderr.flush()
             raise Exception(error_msg)
+    
+    def get_all_storage(self):
+        """
+        Fetch all S3 buckets.
+        
+        Returns:
+            dict: Dictionary containing list of S3 buckets
+        """
+        sys.stderr.write("[AWS get_all_storage] Starting S3 bucket fetch...\n")
+        sys.stderr.flush()
+        
+        result = {
+            'buckets': []
+        }
+        
+        try:
+            # S3 is a global service, but we can use any region for the client
+            # We'll use the configured region or default to us-east-1
+            s3_region = self.region if self.region else 'us-east-1'
+            
+            # Create S3 client
+            s3_client = self.session.client('s3', region_name=s3_region)
+            
+            try:
+                # List all buckets
+                response = s3_client.list_buckets()
+                
+                for bucket in response.get('Buckets', []):
+                    bucket_name = bucket.get('Name', '')
+                    creation_date = bucket.get('CreationDate', None)
+                    
+                    # Get bucket location/region
+                    try:
+                        location_response = s3_client.get_bucket_location(Bucket=bucket_name)
+                        bucket_region = location_response.get('LocationConstraint', 'us-east-1')
+                        # us-east-1 returns None, so handle that
+                        if bucket_region is None:
+                            bucket_region = 'us-east-1'
+                    except Exception as e:
+                        sys.stderr.write(f"[AWS get_all_storage] Could not get location for bucket {bucket_name}: {str(e)}\n")
+                        sys.stderr.flush()
+                        bucket_region = s3_region
+                    
+                    # Get bucket size and object count (this can be slow for large buckets)
+                    # We'll try to get basic info, but won't fail if we can't
+                    size_bytes = 0
+                    object_count = 0
+                    try:
+                        # Use CloudWatch metrics or list objects (limited to first 1000)
+                        # For now, we'll just get basic info
+                        paginator = s3_client.get_paginator('list_objects_v2')
+                        for page in paginator.paginate(Bucket=bucket_name, MaxKeys=1000):
+                            if 'Contents' in page:
+                                object_count += len(page['Contents'])
+                                for obj in page['Contents']:
+                                    size_bytes += obj.get('Size', 0)
+                    except Exception as e:
+                        # If we can't get size info, continue with defaults
+                        sys.stderr.write(f"[AWS get_all_storage] Could not get size info for bucket {bucket_name}: {str(e)}\n")
+                        sys.stderr.flush()
+                    
+                    bucket_info = {
+                        'id': bucket_name,
+                        'name': bucket_name,
+                        'region': bucket_region,
+                        'creation_date': creation_date.isoformat() if creation_date else None,
+                        'size_bytes': size_bytes,
+                        'object_count': object_count,
+                        'type': 'aws',
+                        'resource_type': 's3_bucket'
+                    }
+                    
+                    result['buckets'].append(bucket_info)
+                
+                sys.stderr.write(f"[AWS get_all_storage] Found {len(result['buckets'])} S3 buckets\n")
+                sys.stderr.flush()
+                return result
+            
+            except Exception as e:
+                sys.stderr.write(f"[AWS get_all_storage] Error listing S3 buckets: {str(e)}\n")
+                sys.stderr.flush()
+                return result
+        
+        except Exception as e:
+            import traceback
+            error_msg = f"Error fetching S3 buckets from AWS: {str(e)}"
+            sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
+            sys.stderr.flush()
+            raise Exception(error_msg)
 
 # Global instance (lazy initialization)
 _aws_client = None
