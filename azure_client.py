@@ -99,6 +99,24 @@ class AzureClient:
         
         return status_map.get(state, 'unknown')
     
+    def _extract_tags(self, resource):
+        """
+        Extract tags from an Azure resource and convert to array format.
+        Azure tags are stored as a dictionary where keys are tag names and values are tag values.
+        
+        Args:
+            resource: Azure resource object with tags attribute
+            
+        Returns:
+            list: List of dictionaries with 'key' and 'value' for key-value pairs
+        """
+        tags = []
+        if hasattr(resource, 'tags') and resource.tags:
+            # Azure tags are a dictionary, convert to list of key-value objects
+            for key, value in resource.tags.items():
+                tags.append({'key': key, 'value': value})
+        return tags
+    
     def _generate_vm_id(self, resource_group, vm_name):
         """
         Generate a unique VM ID for Azure VMs.
@@ -316,6 +334,9 @@ class AzureClient:
                             # Get metrics
                             metrics = self._get_vm_metrics_with_client(vm, compute_client, resource_group_name)
                             
+                            # Extract tags
+                            tags = self._extract_tags(vm)
+                            
                             # Normalize VM data to match Proxmox structure
                             vm_id = self._generate_vm_id(resource_group_name, vm.name)
                             
@@ -333,7 +354,8 @@ class AzureClient:
                                 'uptime': metrics['uptime'],
                                 'subscription_id': subscription_id,
                                 'resource_group': resource_group_name,
-                                'location': vm.location if hasattr(vm, 'location') else None
+                                'location': vm.location if hasattr(vm, 'location') else None,
+                                'tags': tags
                             }
                             
                             # Add hardware profile info if available
@@ -459,6 +481,9 @@ class AzureClient:
             # Get metrics (need to pass compute_client and resource_group)
             metrics = self._get_vm_metrics_with_client(vm, compute_client, resource_group)
             
+            # Extract tags
+            tags = self._extract_tags(vm)
+            
             # Build detailed VM info
             vm_details = {
                 'vmid': vm_id,
@@ -474,7 +499,8 @@ class AzureClient:
                 'uptime': metrics['uptime'],
                 'resource_group': resource_group,
                 'location': vm.location,
-                'subscription_id': subscription_id
+                'subscription_id': subscription_id,
+                'tags': tags
             }
             
             # Add hardware profile info
@@ -637,7 +663,8 @@ class AzureClient:
                                     'address_space': address_space,
                                     'subscription_id': subscription_id,
                                     'type': 'azure',
-                                    'resource_type': 'vnet'
+                                    'resource_type': 'vnet',
+                                    'tags': self._extract_tags(vnet)
                                 }
                                 result['vnets'].append(vnet_info)
                             
@@ -653,7 +680,8 @@ class AzureClient:
                                         'address_prefix': subnet.address_prefix,
                                         'subscription_id': subscription_id,
                                         'type': 'azure',
-                                        'resource_type': 'subnet'
+                                        'resource_type': 'subnet',
+                                        'tags': self._extract_tags(subnet)
                                     }
                                     result['subnets'].append(subnet_info)
                             
@@ -667,7 +695,8 @@ class AzureClient:
                                     'location': nsg.location,
                                     'subscription_id': subscription_id,
                                     'type': 'azure',
-                                    'resource_type': 'nsg'
+                                    'resource_type': 'nsg',
+                                    'tags': self._extract_tags(nsg)
                                 }
                                 result['nsgs'].append(nsg_info)
                             
@@ -683,7 +712,8 @@ class AzureClient:
                                     'allocation_method': pip.public_ip_allocation_method.value if hasattr(pip, 'public_ip_allocation_method') and pip.public_ip_allocation_method else None,
                                     'subscription_id': subscription_id,
                                     'type': 'azure',
-                                    'resource_type': 'public_ip'
+                                    'resource_type': 'public_ip',
+                                    'tags': self._extract_tags(pip)
                                 }
                                 result['public_ips'].append(pip_info)
                         
@@ -767,7 +797,8 @@ class AzureClient:
                                     'sku': account.sku.name if account.sku else None,
                                     'subscription_id': subscription_id,
                                     'type': 'azure',
-                                    'resource_type': 'storage_account'
+                                    'resource_type': 'storage_account',
+                                    'tags': self._extract_tags(account)
                                 }
                                 
                                 # Get primary endpoints
@@ -801,7 +832,8 @@ class AzureClient:
                                                 'public_access': container.public_access or 'None',
                                                 'subscription_id': subscription_id,
                                                 'type': 'azure',
-                                                'resource_type': 'blob_container'
+                                                'resource_type': 'blob_container',
+                                                'tags': []  # Containers don't have tags in Azure
                                             }
                                             
                                             # Get container properties for metadata
