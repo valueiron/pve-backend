@@ -4,6 +4,7 @@ Handles connection to Proxmox VE API using direct HTTP requests.
 """
 import os
 import requests
+import ipaddress
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -133,6 +134,110 @@ class ProxmoxClient:
         except requests.exceptions.RequestException as e:
             raise ConnectionError(f"Request failed: {str(e)}")
     
+    def _get_vm_ip_addresses(self, vmid, node_name):
+        """
+        Fetch IP addresses from guest agent for a running VM (eth0 interface only).
+        
+        Args:
+            vmid (int): Virtual Machine ID
+            node_name (str): Node name where the VM is located
+            
+        Returns:
+            list: List of IP addresses from eth0 interface (IPv4 and IPv6), empty list if unavailable
+        """
+        ip_addresses = []
+        
+        try:
+            # Call the guest agent network-get-interfaces endpoint
+            # This endpoint requires the VM to be running and guest agent to be active
+            # The _make_request method extracts 'data' from response, but agent endpoints
+            # might return data in 'result' field, so we need to handle both
+            try:
+                response = self.session.get(
+                    f"{self.base_url}/nodes/{node_name}/qemu/{vmid}/agent/network-get-interfaces",
+                    timeout=5
+                )
+                
+                if response.status_code >= 400:
+                    # Guest agent not available or VM not running
+                    return []
+                
+                json_data = response.json()
+                
+                # Proxmox API typically returns: {"data": {"result": [...]}}
+                # Or sometimes directly: {"data": [...]}
+                # Or agent endpoints: {"data": {"result": [...]}}
+                interfaces = []
+                if isinstance(json_data, dict):
+                    if 'data' in json_data:
+                        data_content = json_data['data']
+                        if isinstance(data_content, dict) and 'result' in data_content:
+                            interfaces = data_content['result']
+                        elif isinstance(data_content, list):
+                            interfaces = data_content
+                    elif 'result' in json_data:
+                        interfaces = json_data['result']
+                elif isinstance(json_data, list):
+                    interfaces = json_data
+            
+            except requests.exceptions.RequestException:
+                # Network error or timeout
+                return []
+            
+            # Parse interfaces to extract IP addresses from eth0 only
+            for interface in interfaces:
+                if not isinstance(interface, dict):
+                    continue
+                
+                # Only process the eth0 interface
+                interface_name = interface.get('name', '')
+                if interface_name != 'eth0':
+                    continue
+                
+                # Get IP addresses from eth0 interface
+                ip_address_entries = interface.get('ip-addresses', [])
+                
+                for ip_entry in ip_address_entries:
+                    if not isinstance(ip_entry, dict):
+                        continue
+                    
+                    ip_addr = ip_entry.get('ip-address', '')
+                    
+                    if not ip_addr:
+                        continue
+                    
+                    try:
+                        # Parse the IP address to validate it
+                        ip_obj = ipaddress.ip_address(ip_addr)
+                        
+                        # Filter out localhost addresses
+                        if ip_obj.is_loopback:
+                            continue
+                        
+                        # Filter out link-local addresses (169.254.0.0/16 for IPv4, fe80::/10 for IPv6)
+                        if ip_obj.is_link_local:
+                            continue
+                        
+                        # Add the IP address to the list if not already present
+                        if ip_addr not in ip_addresses:
+                            ip_addresses.append(ip_addr)
+                    
+                    except ValueError:
+                        # Invalid IP address, skip it
+                        continue
+                
+                # Once we've processed eth0, we can break out of the loop
+                break
+            
+        except Exception as e:
+            # Guest agent might not be available, VM not running, or agent not installed
+            # Return empty list instead of raising an error
+            # Log a debug message but don't fail
+            print(f"Could not fetch IP addresses for VM {vmid} on node {node_name}: {str(e)}")
+            return []
+        
+        return ip_addresses
+    
     def get_all_vms(self):
         """
         Fetch all VMs from all nodes in the Proxmox cluster.
@@ -188,10 +293,22 @@ class ProxmoxClient:
                             # Get tags from the map we built earlier
                             tags = tags_map.get(vmid, [])
                             
+                            vm_status = vm.get('status', 'unknown')
+                            
+                            # Fetch IP addresses from guest agent if VM is running
+                            ip_addresses = []
+                            if vm_status == 'running':
+                                try:
+                                    ip_addresses = self._get_vm_ip_addresses(vmid, node_name)
+                                except Exception as e:
+                                    # If IP fetching fails, continue without IP addresses
+                                    print(f"Warning: Could not fetch IP addresses for VM {vmid}: {str(e)}")
+                                    ip_addresses = []
+                            
                             vm_info = {
                                 'vmid': vmid,
                                 'name': vm.get('name', ''),
-                                'status': vm.get('status', 'unknown'),
+                                'status': vm_status,
                                 'node': node_name,
                                 'cpu': vm.get('cpu', 0),
                                 'mem': vm.get('mem', 0),
@@ -199,7 +316,8 @@ class ProxmoxClient:
                                 'disk': vm.get('disk', 0),
                                 'maxdisk': vm.get('maxdisk', 0),
                                 'uptime': vm.get('uptime', 0),
-                                'tags': tags
+                                'tags': tags,
+                                'ip_addresses': ip_addresses
                             }
                             all_vms.append(vm_info)
                     
@@ -231,6 +349,7 @@ class ProxmoxClient:
                                 continue
                             
                             vmid = vm.get('vmid')
+                            vm_status = vm.get('status', 'unknown')
                             
                             # Get VM config to fetch tags
                             tags = []
@@ -253,10 +372,20 @@ class ProxmoxClient:
                                 # If we can't get tags, continue without them
                                 print(f"Warning: Could not fetch tags for VM {vmid} on node {node_name}: {str(e)}")
                             
+                            # Fetch IP addresses from guest agent if VM is running
+                            ip_addresses = []
+                            if vm_status == 'running':
+                                try:
+                                    ip_addresses = self._get_vm_ip_addresses(vmid, node_name)
+                                except Exception as e:
+                                    # If IP fetching fails, continue without IP addresses
+                                    print(f"Warning: Could not fetch IP addresses for VM {vmid}: {str(e)}")
+                                    ip_addresses = []
+                            
                             vm_info = {
                                 'vmid': vmid,
                                 'name': vm.get('name', ''),
-                                'status': vm.get('status', 'unknown'),
+                                'status': vm_status,
                                 'node': node_name,
                                 'cpu': vm.get('cpu', 0),
                                 'mem': vm.get('mem', 0),
@@ -264,7 +393,8 @@ class ProxmoxClient:
                                 'disk': vm.get('disk', 0),
                                 'maxdisk': vm.get('maxdisk', 0),
                                 'uptime': vm.get('uptime', 0),
-                                'tags': tags
+                                'tags': tags,
+                                'ip_addresses': ip_addresses
                             }
                             all_vms.append(vm_info)
                     
@@ -316,11 +446,22 @@ class ProxmoxClient:
                                 if tag:
                                     tags.append(tag)
                     
+                    # Fetch IP addresses from guest agent if VM is running
+                    vm_status_value = vm_status.get('status', 'unknown')
+                    ip_addresses = []
+                    if vm_status_value == 'running':
+                        try:
+                            ip_addresses = self._get_vm_ip_addresses(vmid, node_name)
+                        except Exception as e:
+                            # If IP fetching fails, continue without IP addresses
+                            print(f"Warning: Could not fetch IP addresses for VM {vmid}: {str(e)}")
+                            ip_addresses = []
+                    
                     # Combine status and config information
                     vm_details = {
                         'vmid': vmid,
                         'name': vm_config.get('name', ''),
-                        'status': vm_status.get('status', 'unknown'),
+                        'status': vm_status_value,
                         'node': node_name,
                         'cpu': vm_status.get('cpu', 0),
                         'mem': vm_status.get('mem', 0),
@@ -335,7 +476,8 @@ class ProxmoxClient:
                         'cores': vm_config.get('cores', 1),
                         'sockets': vm_config.get('sockets', 1),
                         'memory': vm_config.get('memory', 0),
-                        'tags': tags
+                        'tags': tags,
+                        'ip_addresses': ip_addresses
                     }
                     
                     return vm_details
