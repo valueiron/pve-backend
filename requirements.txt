@@ -3,6 +3,8 @@ prometheus-client
 python-dotenv
 flask-cors
 requests
+websocket-client
+websockets
 azure-identity
 azure-mgmt-compute
 azure-mgmt-resource
