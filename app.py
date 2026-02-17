@@ -3,6 +3,12 @@ from flask_cors import CORS
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 import time
 import sys
+import ssl
+import asyncio
+import threading
+import urllib.parse
+import websocket as ws_client
+import websockets
 from proxmox_client import get_proxmox_client
 
 # Import Azure client with error handling
@@ -584,7 +590,144 @@ def get_storage():
         sys.stderr.flush()
         return jsonify({"error": f"Failed to fetch storage resources: {str(e)}"}), 500
 
+@app.route('/api/vms/<vmid>/vncproxy', methods=['POST'])
+def create_vnc_proxy(vmid):
+    """Create a VNC proxy ticket for a Proxmox VM"""
+    try:
+        try:
+            vmid_int = int(vmid)
+        except ValueError:
+            return jsonify({"error": f"VNC console is only available for Proxmox VMs (numeric ID), got: {vmid}"}), 400
+
+        proxmox = get_proxmox_client()
+        result = proxmox.create_vnc_proxy(vmid_int)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        sys.stderr.write(f"[VNC API] Error creating VNC proxy for VM {vmid}: {str(e)}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"Failed to create VNC proxy: {str(e)}"}), 500
+
+
+async def vnc_websocket_handler(browser_ws):
+    """WebSocket proxy between the browser (noVNC) and the Proxmox VNC WebSocket.
+    Runs on port 5001 via the standalone websockets server."""
+    path = browser_ws.request.path
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+
+    vmid = params.get('vmid', [None])[0]
+    port = params.get('port', [None])[0]
+    vncticket = params.get('vncticket', [None])[0]
+    node = params.get('node', [None])[0]
+
+    if not all([vmid, port, vncticket, node]):
+        await browser_ws.close(1008, 'Missing required query params: vmid, port, vncticket, node')
+        return
+
+    proxmox = get_proxmox_client()
+    proxmox_ws_url = proxmox.get_vnc_websocket_url(node, int(vmid), port, vncticket)
+
+    sys.stderr.write(f"[VNC WS] Connecting to Proxmox VNC WebSocket for VM {vmid} on {node}\n")
+    sys.stderr.flush()
+
+    # Connect to the Proxmox VNC WebSocket using websocket-client (sync) in a thread
+    sslopt = {"cert_reqs": ssl.CERT_NONE}
+    proxmox_ws = ws_client.WebSocket(sslopt=sslopt)
+    try:
+        proxmox_ws.connect(
+            proxmox_ws_url,
+            header=[f"Authorization: {proxmox.auth_header}"],
+            subprotocols=["binary"]
+        )
+    except Exception as e:
+        sys.stderr.write(f"[VNC WS] Failed to connect to Proxmox: {e}\n")
+        sys.stderr.flush()
+        await browser_ws.close(1011, f'Failed to connect to Proxmox VNC: {e}')
+        return
+
+    sys.stderr.write(f"[VNC WS] Connected to Proxmox VNC WebSocket for VM {vmid}\n")
+    sys.stderr.flush()
+
+    loop = asyncio.get_event_loop()
+    closed = asyncio.Event()
+
+    # Forward Proxmox -> browser (sync recv in thread, async send)
+    async def proxmox_to_browser():
+        try:
+            while not closed.is_set():
+                try:
+                    opcode, data = await loop.run_in_executor(
+                        None, lambda: proxmox_ws.recv_data(control_frame=True)
+                    )
+                    if opcode == 8:  # close
+                        break
+                    if opcode == 2 and data:  # binary
+                        await browser_ws.send(data)
+                    elif opcode == 1 and data:  # text
+                        await browser_ws.send(data.decode('utf-8', errors='replace'))
+                except Exception as e:
+                    sys.stderr.write(f"[VNC WS] Proxmox->browser error VM {vmid}: {type(e).__name__}: {e}\n")
+                    sys.stderr.flush()
+                    break
+        finally:
+            closed.set()
+
+    # Forward browser -> Proxmox
+    async def browser_to_proxmox():
+        try:
+            async for message in browser_ws:
+                if closed.is_set():
+                    break
+                if isinstance(message, bytes):
+                    await loop.run_in_executor(None, proxmox_ws.send_binary, message)
+                else:
+                    await loop.run_in_executor(None, proxmox_ws.send, message)
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        except Exception as e:
+            sys.stderr.write(f"[VNC WS] Browser->Proxmox error VM {vmid}: {type(e).__name__}: {e}\n")
+            sys.stderr.flush()
+        finally:
+            closed.set()
+
+    try:
+        await asyncio.gather(proxmox_to_browser(), browser_to_proxmox())
+    finally:
+        try:
+            proxmox_ws.close()
+        except Exception:
+            pass
+
+    sys.stderr.write(f"[VNC WS] Disconnected VNC WebSocket for VM {vmid}\n")
+    sys.stderr.flush()
+
+
+def start_vnc_ws_server():
+    """Start the standalone WebSocket server for VNC proxying on port 5001"""
+    async def _serve():
+        async with websockets.serve(
+            vnc_websocket_handler,
+            '0.0.0.0',
+            5001,
+            origins=None,
+            select_subprotocol=lambda conn, subprotocols: 'binary' if 'binary' in subprotocols else None,
+            ping_interval=20,
+            ping_timeout=60,
+            max_size=2**23,
+        ) as server:
+            sys.stderr.write("[VNC WS] WebSocket server listening on port 5001\n")
+            sys.stderr.flush()
+            await asyncio.get_event_loop().create_future()  # run forever
+
+    asyncio.run(_serve())
+
+
 if __name__ == '__main__':
+    # Start VNC WebSocket server in a background thread
+    vnc_thread = threading.Thread(target=start_vnc_ws_server, daemon=True)
+    vnc_thread.start()
+
     # Start Flask server
     print("Starting Flask server on port 5000...")
     app.run(host='0.0.0.0', port=5000, threaded=True)

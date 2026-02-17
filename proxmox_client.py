@@ -634,7 +634,47 @@ class ProxmoxClient:
         except Exception as e:
             raise Exception(f"Error shutting down VM {vmid}: {str(e)}")
     
-# VNC console functionality has been removed
+    def create_vnc_proxy(self, vmid):
+        """
+        Create a VNC proxy connection for a VM.
+        Calls the Proxmox API to get a VNC ticket and port.
+
+        Args:
+            vmid (int): Virtual Machine ID
+
+        Returns:
+            dict: VNC proxy info containing ticket, port, node, etc.
+        """
+        node_name = self._find_vm_node(vmid)
+        result = self._make_request(
+            'POST',
+            f'/nodes/{node_name}/qemu/{vmid}/vncproxy',
+            data={'websocket': 1}
+        )
+        result['node'] = node_name
+        return result
+
+    def get_vnc_websocket_url(self, node, vmid, port, vncticket):
+        """
+        Build the Proxmox VNC WebSocket URL.
+
+        Args:
+            node (str): Node name
+            vmid (int): Virtual Machine ID
+            port (str): VNC port from vncproxy
+            vncticket (str): VNC ticket from vncproxy
+
+        Returns:
+            str: Full WebSocket URL to connect to Proxmox
+        """
+        import urllib.parse
+        # Build the base host from our configured base_url
+        # base_url is like https://host:8006/api2/json
+        # We need wss://host:8006
+        base = self.base_url.replace('/api2/json', '')
+        ws_base = base.replace('https://', 'wss://').replace('http://', 'ws://')
+        encoded_ticket = urllib.parse.quote(vncticket, safe='')
+        return f"{ws_base}/api2/json/nodes/{node}/qemu/{vmid}/vncwebsocket?port={port}&vncticket={encoded_ticket}"
 
 # Global instance (lazy initialization)
 _proxmox_client = None
