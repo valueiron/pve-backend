@@ -590,6 +590,136 @@ def get_storage():
         sys.stderr.flush()
         return jsonify({"error": f"Failed to fetch storage resources: {str(e)}"}), 500
 
+@app.route('/api/templates', methods=['GET'])
+def get_templates():
+    """Get list of all Proxmox VM templates"""
+    try:
+        proxmox = get_proxmox_client()
+        templates = proxmox.get_templates()
+        return jsonify({"templates": templates}), 200
+    except Exception as e:
+        sys.stderr.write(f"[Templates API] Error fetching templates: {str(e)}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"Failed to fetch templates: {str(e)}"}), 500
+
+
+@app.route('/api/vms/clone', methods=['POST'])
+def clone_vm():
+    """Clone a Proxmox VM or template to a new VM"""
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "Request body is required"}), 400
+
+        node = data.get('node')
+        vmid = data.get('vmid')
+        newid = data.get('newid')
+        name = data.get('name')
+        full = data.get('full', True)
+        storage = data.get('storage')
+        target_node = data.get('target_node')
+        tags = data.get('tags') or None
+        description = data.get('description') or None
+        ciuser = data.get('ciuser') or None
+        cipassword = data.get('cipassword') or None
+        sshkeys = data.get('sshkeys') or None
+        ipconfig0 = data.get('ipconfig0') or None
+
+        if not node:
+            return jsonify({"error": "Source node is required"}), 400
+        if not vmid:
+            return jsonify({"error": "Source VM ID is required"}), 400
+        if not newid:
+            return jsonify({"error": "New VM ID is required"}), 400
+
+        proxmox = get_proxmox_client()
+        result = proxmox.clone_vm(
+            node=node,
+            vmid=int(vmid),
+            newid=int(newid),
+            name=name or None,
+            full=bool(full),
+            storage=storage or None,
+            target_node=target_node or None,
+            tags=tags,
+            description=description,
+            ciuser=ciuser,
+            cipassword=cipassword,
+            sshkeys=sshkeys,
+            ipconfig0=ipconfig0,
+        )
+        return jsonify({"message": f"VM {newid} cloned from template {vmid} successfully", "data": result}), 201
+    except Exception as e:
+        sys.stderr.write(f"[VM Clone API] Error cloning VM: {str(e)}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"Failed to clone VM: {str(e)}"}), 500
+
+
+@app.route('/api/nextid', methods=['GET'])
+def get_next_vmid():
+    """Get the next available VM ID from the Proxmox cluster"""
+    try:
+        proxmox = get_proxmox_client()
+        next_id = proxmox.get_next_vmid()
+        return jsonify({"vmid": next_id}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to get next VM ID: {str(e)}"}), 500
+
+
+@app.route('/api/vms', methods=['POST'])
+def create_vm():
+    """Create a new Proxmox VM"""
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "Request body is required"}), 400
+
+        node = data.get('node')
+        vmid = data.get('vmid')
+        name = data.get('name', f'vm-{vmid}')
+        cores = int(data.get('cores', 1))
+        memory = int(data.get('memory', 512))
+        storage = data.get('storage')
+        disk_gb = int(data.get('disk_gb', 10))
+        start = bool(data.get('start', False))
+        tags = data.get('tags') or None
+        description = data.get('description') or None
+        ciuser = data.get('ciuser') or None
+        cipassword = data.get('cipassword') or None
+        sshkeys = data.get('sshkeys') or None
+        ipconfig0 = data.get('ipconfig0') or None
+
+        if not node:
+            return jsonify({"error": "Node is required"}), 400
+        if not vmid:
+            return jsonify({"error": "VM ID is required"}), 400
+        if not storage:
+            return jsonify({"error": "Storage is required"}), 400
+
+        proxmox = get_proxmox_client()
+        result = proxmox.create_vm(
+            node=node,
+            vmid=int(vmid),
+            name=name,
+            cores=cores,
+            memory_mb=memory,
+            storage=storage,
+            disk_gb=disk_gb,
+            start=start,
+            tags=tags,
+            description=description,
+            ciuser=ciuser,
+            cipassword=cipassword,
+            sshkeys=sshkeys,
+            ipconfig0=ipconfig0,
+        )
+        return jsonify({"message": f"VM {vmid} ({name}) created successfully", "data": result}), 201
+    except Exception as e:
+        sys.stderr.write(f"[VM Create API] Error creating VM: {str(e)}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"Failed to create VM: {str(e)}"}), 500
+
+
 @app.route('/api/vms/<vmid>/vncproxy', methods=['POST'])
 def create_vnc_proxy(vmid):
     """Create a VNC proxy ticket for a Proxmox VM"""

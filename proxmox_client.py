@@ -634,6 +634,229 @@ class ProxmoxClient:
         except Exception as e:
             raise Exception(f"Error shutting down VM {vmid}: {str(e)}")
     
+    def get_templates(self):
+        """
+        Fetch all VM templates from all nodes in the Proxmox cluster.
+
+        Returns:
+            list: List of dicts with vmid, name, node for each template
+        """
+        templates = []
+        try:
+            nodes = self._make_request('GET', '/nodes')
+            for node in nodes:
+                node_name = node['node']
+                try:
+                    vms = self._make_request('GET', f'/nodes/{node_name}/qemu')
+                    for vm in vms:
+                        if vm.get('template', 0) == 1:
+                            templates.append({
+                                'vmid': vm.get('vmid'),
+                                'name': vm.get('name', f'template-{vm.get("vmid")}'),
+                                'node': node_name,
+                            })
+                except Exception as e:
+                    print(f"Error fetching templates from node {node_name}: {str(e)}")
+                    continue
+            return templates
+        except Exception as e:
+            raise Exception(f"Error fetching templates: {str(e)}")
+
+    def _wait_for_task(self, node, upid, timeout=120, poll_interval=2):
+        """
+        Poll a Proxmox task until it reaches 'stopped' status.
+
+        Args:
+            node (str): Node the task is running on
+            upid (str): Task UPID string
+            timeout (int): Maximum seconds to wait before raising
+            poll_interval (int): Seconds between status checks
+
+        Raises:
+            Exception: If the task fails or times out
+        """
+        import time
+        import urllib.parse
+
+        encoded_upid = urllib.parse.quote(str(upid), safe='')
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            try:
+                status = self._make_request('GET', f'/nodes/{node}/tasks/{encoded_upid}/status')
+                if status.get('status') == 'stopped':
+                    exit_code = status.get('exitstatus', 'ERROR')
+                    if exit_code == 'OK':
+                        return
+                    raise Exception(f"Task failed with exit status: {exit_code}")
+            except Exception as e:
+                if 'Task failed' in str(e):
+                    raise
+                # Ignore transient connection / not-ready errors
+            time.sleep(poll_interval)
+
+        raise Exception(f"Task timed out after {timeout}s")
+
+    def update_vm_config(self, node, vmid, config_dict):
+        """
+        Update VM configuration fields via PUT.
+
+        Args:
+            node (str): Node where the VM resides
+            vmid (int): VM ID
+            config_dict (dict): Configuration key/value pairs to apply
+
+        Returns:
+            None
+        """
+        try:
+            self._make_request('PUT', f'/nodes/{node}/qemu/{vmid}/config', data=config_dict)
+        except Exception as e:
+            raise Exception(f"Error updating config for VM {vmid}: {str(e)}")
+
+    def clone_vm(self, node, vmid, newid, name=None, full=True, storage=None, target_node=None,
+                 tags=None, description=None, ciuser=None, cipassword=None,
+                 sshkeys=None, ipconfig0=None):
+        """
+        Clone a VM or template to a new VM, then optionally apply cloud-init /
+        tag / description settings once the clone task completes.
+
+        Args:
+            node (str): Source node name
+            vmid (int): Source VM/template ID
+            newid (int): New VM ID
+            name (str, optional): Name for the new VM
+            full (bool): Full clone (True) vs linked clone (False)
+            storage (str, optional): Storage pool for the full clone's disk
+            target_node (str, optional): Target node (defaults to same as source)
+            tags (str, optional): Semicolon-separated tag string
+            description (str, optional): VM description / notes
+            ciuser (str, optional): Cloud-init default user
+            cipassword (str, optional): Cloud-init password
+            sshkeys (str, optional): Newline-separated SSH public keys
+            ipconfig0 (str, optional): Cloud-init IP config string, e.g. 'ip=dhcp'
+
+        Returns:
+            str: Task UPID
+        """
+        import urllib.parse
+
+        try:
+            data = {
+                'newid': newid,
+                'full': 1 if full else 0,
+            }
+            if name:
+                data['name'] = name
+            if storage:
+                data['storage'] = storage
+            if target_node:
+                data['target'] = target_node
+
+            upid = self._make_request('POST', f'/nodes/{node}/qemu/{vmid}/clone', data=data)
+
+            # Build the post-clone config dict
+            config = {}
+            if tags:
+                config['tags'] = tags
+            if description:
+                config['description'] = description
+            if ciuser:
+                config['ciuser'] = ciuser
+            if cipassword:
+                config['cipassword'] = cipassword
+            if sshkeys:
+                config['sshkeys'] = urllib.parse.quote(sshkeys.strip(), safe='')
+            if ipconfig0:
+                config['ipconfig0'] = ipconfig0
+
+            if config:
+                config_node = target_node or node
+                self._wait_for_task(config_node, upid)
+                self.update_vm_config(config_node, newid, config)
+
+            return upid
+        except Exception as e:
+            raise Exception(f"Error cloning VM {vmid}: {str(e)}")
+
+    def get_next_vmid(self):
+        """
+        Get the next available VM ID from the Proxmox cluster.
+
+        Returns:
+            int: Next available VM ID
+        """
+        try:
+            result = self._make_request('GET', '/cluster/nextid')
+            return int(result)
+        except Exception as e:
+            raise Exception(f"Error getting next VM ID: {str(e)}")
+
+    def create_vm(self, node, vmid, name, cores, memory_mb, storage, disk_gb, start=False,
+                  tags=None, description=None, ciuser=None, cipassword=None,
+                  sshkeys=None, ipconfig0=None):
+        """
+        Create a new virtual machine on a specific node.
+
+        Args:
+            node (str): Node name
+            vmid (int): VM ID
+            name (str): VM name
+            cores (int): Number of CPU cores
+            memory_mb (int): Memory in MB
+            storage (str): Storage pool name
+            disk_gb (int): Disk size in GB
+            start (bool): Whether to start the VM after creation
+            tags (str, optional): Semicolon-separated tag string
+            description (str, optional): VM description / notes
+            ciuser (str, optional): Cloud-init default user
+            cipassword (str, optional): Cloud-init password
+            sshkeys (str, optional): Newline-separated SSH public keys (will be URL-encoded)
+            ipconfig0 (str, optional): Cloud-init IP config string, e.g. 'ip=dhcp'
+
+        Returns:
+            dict: Task information
+        """
+        import urllib.parse
+
+        try:
+            data = {
+                'vmid': vmid,
+                'name': name,
+                'cores': cores,
+                'memory': memory_mb,
+                'sockets': 1,
+                'cpu': 'host',
+                'scsi0': f'{storage}:{disk_gb}',
+                'net0': 'virtio,bridge=vmbr0',
+                'ostype': 'l26',
+                'scsihw': 'virtio-scsi-pci',
+                'start': 1 if start else 0,
+            }
+
+            if tags:
+                data['tags'] = tags
+            if description:
+                data['description'] = description
+
+            # If any cloud-init field is provided, attach a cloud-init drive
+            has_ci = any([ciuser, cipassword, sshkeys, ipconfig0])
+            if has_ci:
+                data['ide2'] = f'{storage}:cloudinit'
+            if ciuser:
+                data['ciuser'] = ciuser
+            if cipassword:
+                data['cipassword'] = cipassword
+            if sshkeys:
+                data['sshkeys'] = urllib.parse.quote(sshkeys.strip(), safe='')
+            if ipconfig0:
+                data['ipconfig0'] = ipconfig0
+
+            result = self._make_request('POST', f'/nodes/{node}/qemu', data=data)
+            return result
+        except Exception as e:
+            raise Exception(f"Error creating VM on node {node}: {str(e)}")
+
     def create_vnc_proxy(self, vmid):
         """
         Create a VNC proxy connection for a VM.
