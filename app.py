@@ -9,7 +9,12 @@ import threading
 import urllib.parse
 import websocket as ws_client
 import websockets
+import requests as http_requests
+import os
 from proxmox_client import get_proxmox_client
+
+# Docker API base URL - set via DOCKER_API_URL env var (default for local dev)
+DOCKER_API_URL = os.getenv('DOCKER_API_URL', 'http://localhost:8080')
 
 # Import Azure client with error handling
 try:
@@ -589,6 +594,105 @@ def get_storage():
         sys.stderr.write(f"[Storage API] Fatal error: {str(e)}\n{traceback.format_exc()}\n")
         sys.stderr.flush()
         return jsonify({"error": f"Failed to fetch storage resources: {str(e)}"}), 500
+
+def _docker_proxy(path, method='GET', **kwargs):
+    """Forward a request to the docker-api service and return a Flask response."""
+    url = f"{DOCKER_API_URL}/{path.lstrip('/')}"
+    try:
+        resp = http_requests.request(
+            method,
+            url,
+            params=request.args,
+            json=request.get_json(silent=True),
+            timeout=30,
+            **kwargs
+        )
+        content_type = resp.headers.get('Content-Type', 'application/json')
+        return Response(resp.content, status=resp.status_code, content_type=content_type)
+    except http_requests.exceptions.ConnectionError:
+        return jsonify({"error": "docker-api service is not reachable"}), 503
+    except http_requests.exceptions.Timeout:
+        return jsonify({"error": "docker-api request timed out"}), 504
+    except Exception as e:
+        sys.stderr.write(f"[Docker API] Error proxying to {url}: {str(e)}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"Docker API error: {str(e)}"}), 500
+
+
+@app.route('/api/docker/containers')
+def docker_list_containers():
+    return _docker_proxy('containers')
+
+
+@app.route('/api/docker/containers/<container_id>/start', methods=['POST'])
+def docker_start_container(container_id):
+    return _docker_proxy(f'containers/start/{container_id}', method='POST')
+
+
+@app.route('/api/docker/containers/<container_id>/stop', methods=['POST'])
+def docker_stop_container(container_id):
+    return _docker_proxy(f'containers/stop/{container_id}', method='POST')
+
+
+@app.route('/api/docker/containers/<container_id>/restart', methods=['POST'])
+def docker_restart_container(container_id):
+    return _docker_proxy(f'containers/restart/{container_id}', method='POST')
+
+
+@app.route('/api/docker/containers/<container_id>/logs')
+def docker_container_logs(container_id):
+    return _docker_proxy(f'containers/{container_id}/logs')
+
+
+@app.route('/api/docker/containers/<container_id>/metrics')
+def docker_container_metrics(container_id):
+    return _docker_proxy(f'containers/{container_id}/metrics')
+
+
+@app.route('/api/docker/containers/<container_id>', methods=['GET'])
+def docker_inspect_container(container_id):
+    return _docker_proxy(f'containers/{container_id}')
+
+
+@app.route('/api/docker/images')
+def docker_list_images():
+    return _docker_proxy('images')
+
+
+@app.route('/api/docker/images/<path:image_id>')
+def docker_inspect_image(image_id):
+    return _docker_proxy(f'images/{image_id}')
+
+
+@app.route('/api/docker/volumes')
+def docker_list_volumes():
+    return _docker_proxy('volumes')
+
+
+@app.route('/api/docker/volumes/<vol_name>')
+def docker_inspect_volume(vol_name):
+    return _docker_proxy(f'volumes/{vol_name}')
+
+
+@app.route('/api/docker/networks')
+def docker_list_networks():
+    return _docker_proxy('networks')
+
+
+@app.route('/api/docker/networks/<net_id>')
+def docker_inspect_network(net_id):
+    return _docker_proxy(f'networks/{net_id}')
+
+
+@app.route('/api/docker/system/info')
+def docker_system_info():
+    return _docker_proxy('system/info')
+
+
+@app.route('/api/docker/system/disk')
+def docker_system_disk():
+    return _docker_proxy('system/disk')
+
 
 @app.route('/api/vms/<vmid>/vncproxy', methods=['POST'])
 def create_vnc_proxy(vmid):
