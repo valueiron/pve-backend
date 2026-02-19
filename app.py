@@ -16,6 +16,9 @@ from proxmox_client import get_proxmox_client
 # Docker API base URL - set via DOCKER_API_URL env var (default for local dev)
 DOCKER_API_URL = os.getenv('DOCKER_API_URL', 'http://localhost:8080')
 
+# Kubernetes API base URL - set via K8S_API_URL env var (default for local dev)
+K8S_API_URL = os.getenv('K8S_API_URL', 'http://localhost:8081')
+
 # Import Azure client with error handling
 try:
     from azure_client import get_azure_client
@@ -692,6 +695,172 @@ def docker_system_info():
 @app.route('/api/docker/system/disk')
 def docker_system_disk():
     return _docker_proxy('system/disk')
+
+
+# --- Kubernetes API Proxy ---
+
+def _k8s_proxy(path, method='GET', **kwargs):
+    """Forward a request to the k8s-api service and return a Flask response."""
+    url = f"{K8S_API_URL}/{path.lstrip('/')}"
+    try:
+        resp = http_requests.request(
+            method,
+            url,
+            params=request.args,
+            json=request.get_json(silent=True),
+            timeout=30,
+            **kwargs
+        )
+        content_type = resp.headers.get('Content-Type', 'application/json')
+        return Response(resp.content, status=resp.status_code, content_type=content_type)
+    except http_requests.exceptions.ConnectionError:
+        return jsonify({"error": "k8s-api service is not reachable"}), 503
+    except http_requests.exceptions.Timeout:
+        return jsonify({"error": "k8s-api request timed out"}), 504
+    except Exception as e:
+        sys.stderr.write(f"[K8s API] Error proxying to {url}: {str(e)}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"K8s API error: {str(e)}"}), 500
+
+
+# Pods
+@app.route('/api/k8s/pods')
+def k8s_list_pods():
+    return _k8s_proxy('pods')
+
+@app.route('/api/k8s/pods/<namespace>/<name>')
+def k8s_get_pod(namespace, name):
+    return _k8s_proxy(f'pods/{namespace}/{name}')
+
+@app.route('/api/k8s/pods/<namespace>/<name>', methods=['DELETE'])
+def k8s_delete_pod(namespace, name):
+    return _k8s_proxy(f'pods/{namespace}/{name}', method='DELETE')
+
+@app.route('/api/k8s/pods/<namespace>/<name>/logs')
+def k8s_pod_logs(namespace, name):
+    return _k8s_proxy(f'pods/{namespace}/{name}/logs')
+
+@app.route('/api/k8s/pods/<namespace>/<name>/metrics')
+def k8s_pod_metrics(namespace, name):
+    return _k8s_proxy(f'pods/{namespace}/{name}/metrics')
+
+@app.route('/api/k8s/pods/<namespace>/<name>/restart', methods=['POST'])
+def k8s_restart_pod(namespace, name):
+    return _k8s_proxy(f'pods/{namespace}/{name}/restart', method='POST')
+
+
+# Deployments
+@app.route('/api/k8s/deployments')
+def k8s_list_deployments():
+    return _k8s_proxy('deployments')
+
+@app.route('/api/k8s/deployments', methods=['POST'])
+def k8s_create_deployment():
+    return _k8s_proxy('deployments', method='POST')
+
+@app.route('/api/k8s/deployments/<namespace>/<name>')
+def k8s_get_deployment(namespace, name):
+    return _k8s_proxy(f'deployments/{namespace}/{name}')
+
+@app.route('/api/k8s/deployments/<namespace>/<name>', methods=['DELETE'])
+def k8s_delete_deployment(namespace, name):
+    return _k8s_proxy(f'deployments/{namespace}/{name}', method='DELETE')
+
+@app.route('/api/k8s/deployments/<namespace>/<name>/scale', methods=['POST'])
+def k8s_scale_deployment(namespace, name):
+    return _k8s_proxy(f'deployments/{namespace}/{name}/scale', method='POST')
+
+@app.route('/api/k8s/deployments/<namespace>/<name>/restart', methods=['POST'])
+def k8s_restart_deployment(namespace, name):
+    return _k8s_proxy(f'deployments/{namespace}/{name}/restart', method='POST')
+
+
+# Services
+@app.route('/api/k8s/services')
+def k8s_list_services():
+    return _k8s_proxy('services')
+
+@app.route('/api/k8s/services', methods=['POST'])
+def k8s_create_service():
+    return _k8s_proxy('services', method='POST')
+
+@app.route('/api/k8s/services/<namespace>/<name>')
+def k8s_get_service(namespace, name):
+    return _k8s_proxy(f'services/{namespace}/{name}')
+
+@app.route('/api/k8s/services/<namespace>/<name>', methods=['DELETE'])
+def k8s_delete_service(namespace, name):
+    return _k8s_proxy(f'services/{namespace}/{name}', method='DELETE')
+
+
+# Namespaces
+@app.route('/api/k8s/namespaces')
+def k8s_list_namespaces():
+    return _k8s_proxy('namespaces')
+
+@app.route('/api/k8s/namespaces', methods=['POST'])
+def k8s_create_namespace():
+    return _k8s_proxy('namespaces', method='POST')
+
+@app.route('/api/k8s/namespaces/<name>')
+def k8s_get_namespace(name):
+    return _k8s_proxy(f'namespaces/{name}')
+
+@app.route('/api/k8s/namespaces/<name>', methods=['DELETE'])
+def k8s_delete_namespace(name):
+    return _k8s_proxy(f'namespaces/{name}', method='DELETE')
+
+
+# ConfigMaps
+@app.route('/api/k8s/configmaps')
+def k8s_list_configmaps():
+    return _k8s_proxy('configmaps')
+
+@app.route('/api/k8s/configmaps', methods=['POST'])
+def k8s_create_configmap():
+    return _k8s_proxy('configmaps', method='POST')
+
+@app.route('/api/k8s/configmaps/<namespace>/<name>')
+def k8s_get_configmap(namespace, name):
+    return _k8s_proxy(f'configmaps/{namespace}/{name}')
+
+@app.route('/api/k8s/configmaps/<namespace>/<name>', methods=['DELETE'])
+def k8s_delete_configmap(namespace, name):
+    return _k8s_proxy(f'configmaps/{namespace}/{name}', method='DELETE')
+
+
+# PersistentVolumeClaims
+@app.route('/api/k8s/pvcs')
+def k8s_list_pvcs():
+    return _k8s_proxy('pvcs')
+
+@app.route('/api/k8s/pvcs', methods=['POST'])
+def k8s_create_pvc():
+    return _k8s_proxy('pvcs', method='POST')
+
+@app.route('/api/k8s/pvcs/<namespace>/<name>')
+def k8s_get_pvc(namespace, name):
+    return _k8s_proxy(f'pvcs/{namespace}/{name}')
+
+@app.route('/api/k8s/pvcs/<namespace>/<name>', methods=['DELETE'])
+def k8s_delete_pvc(namespace, name):
+    return _k8s_proxy(f'pvcs/{namespace}/{name}', method='DELETE')
+
+
+# Nodes
+@app.route('/api/k8s/nodes')
+def k8s_list_nodes():
+    return _k8s_proxy('nodes')
+
+@app.route('/api/k8s/nodes/<name>')
+def k8s_get_node(name):
+    return _k8s_proxy(f'nodes/{name}')
+
+
+# System
+@app.route('/api/k8s/system/info')
+def k8s_system_info():
+    return _k8s_proxy('system/info')
 
 
 @app.route('/api/vms/<vmid>/vncproxy', methods=['POST'])
