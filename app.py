@@ -19,6 +19,9 @@ DOCKER_API_URL = os.getenv('DOCKER_API_URL', 'http://localhost:8080')
 # Kubernetes API base URL - set via K8S_API_URL env var (default for local dev)
 K8S_API_URL = os.getenv('K8S_API_URL', 'http://localhost:8081')
 
+# VyOS API base URL - set via VYOS_API_URL env var (default for local dev)
+VYOS_API_URL = os.getenv('VYOS_API_URL', 'http://localhost:8082')
+
 # Import Azure client with error handling
 try:
     from azure_client import get_azure_client
@@ -861,6 +864,171 @@ def k8s_get_node(name):
 @app.route('/api/k8s/system/info')
 def k8s_system_info():
     return _k8s_proxy('system/info')
+
+
+# --- VyOS API Proxy ---
+
+def _vyos_proxy(path, method='GET', **kwargs):
+    """Forward a request to the vyos-api service and return a Flask response."""
+    url = f"{VYOS_API_URL}/{path.lstrip('/')}"
+    try:
+        resp = http_requests.request(
+            method,
+            url,
+            params=request.args,
+            json=request.get_json(silent=True),
+            timeout=30,
+            **kwargs
+        )
+        content_type = resp.headers.get('Content-Type', 'application/json')
+        return Response(resp.content, status=resp.status_code, content_type=content_type)
+    except http_requests.exceptions.ConnectionError:
+        return jsonify({"error": "vyos-api service is not reachable"}), 503
+    except http_requests.exceptions.Timeout:
+        return jsonify({"error": "vyos-api request timed out"}), 504
+    except Exception as e:
+        sys.stderr.write(f"[VyOS API] Error proxying to {url}: {str(e)}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"VyOS API error: {str(e)}"}), 500
+
+
+@app.route('/api/vyos/devices')
+def vyos_list_devices():
+    return _vyos_proxy('devices')
+
+
+# Networks (interfaces)
+@app.route('/api/vyos/<device_id>/networks', methods=['GET'])
+def vyos_list_networks(device_id):
+    return _vyos_proxy(f'devices/{device_id}/networks')
+
+@app.route('/api/vyos/<device_id>/networks', methods=['POST'])
+def vyos_create_network(device_id):
+    return _vyos_proxy(f'devices/{device_id}/networks', method='POST')
+
+@app.route('/api/vyos/<device_id>/networks/<interface>', methods=['GET'])
+def vyos_get_network(device_id, interface):
+    return _vyos_proxy(f'devices/{device_id}/networks/{interface}')
+
+@app.route('/api/vyos/<device_id>/networks/<interface>', methods=['PUT'])
+def vyos_update_network(device_id, interface):
+    return _vyos_proxy(f'devices/{device_id}/networks/{interface}', method='PUT')
+
+@app.route('/api/vyos/<device_id>/networks/<interface>', methods=['DELETE'])
+def vyos_delete_network(device_id, interface):
+    return _vyos_proxy(f'devices/{device_id}/networks/{interface}', method='DELETE')
+
+
+# VRFs
+@app.route('/api/vyos/<device_id>/vrfs', methods=['GET'])
+def vyos_list_vrfs(device_id):
+    return _vyos_proxy(f'devices/{device_id}/vrfs')
+
+@app.route('/api/vyos/<device_id>/vrfs', methods=['POST'])
+def vyos_create_vrf(device_id):
+    return _vyos_proxy(f'devices/{device_id}/vrfs', method='POST')
+
+@app.route('/api/vyos/<device_id>/vrfs/<vrf>', methods=['GET'])
+def vyos_get_vrf(device_id, vrf):
+    return _vyos_proxy(f'devices/{device_id}/vrfs/{vrf}')
+
+@app.route('/api/vyos/<device_id>/vrfs/<vrf>', methods=['PUT'])
+def vyos_update_vrf(device_id, vrf):
+    return _vyos_proxy(f'devices/{device_id}/vrfs/{vrf}', method='PUT')
+
+@app.route('/api/vyos/<device_id>/vrfs/<vrf>', methods=['DELETE'])
+def vyos_delete_vrf(device_id, vrf):
+    return _vyos_proxy(f'devices/{device_id}/vrfs/{vrf}', method='DELETE')
+
+
+# VLANs
+@app.route('/api/vyos/<device_id>/vlans', methods=['GET'])
+def vyos_list_vlans(device_id):
+    return _vyos_proxy(f'devices/{device_id}/vlans')
+
+@app.route('/api/vyos/<device_id>/vlans', methods=['POST'])
+def vyos_create_vlan(device_id):
+    return _vyos_proxy(f'devices/{device_id}/vlans', method='POST')
+
+@app.route('/api/vyos/<device_id>/vlans/<interface>/<vlan_id>', methods=['GET'])
+def vyos_get_vlan(device_id, interface, vlan_id):
+    return _vyos_proxy(f'devices/{device_id}/vlans/{interface}/{vlan_id}')
+
+@app.route('/api/vyos/<device_id>/vlans/<interface>/<vlan_id>', methods=['PUT'])
+def vyos_update_vlan(device_id, interface, vlan_id):
+    return _vyos_proxy(f'devices/{device_id}/vlans/{interface}/{vlan_id}', method='PUT')
+
+@app.route('/api/vyos/<device_id>/vlans/<interface>/<vlan_id>', methods=['DELETE'])
+def vyos_delete_vlan(device_id, interface, vlan_id):
+    return _vyos_proxy(f'devices/{device_id}/vlans/{interface}/{vlan_id}', method='DELETE')
+
+
+# Firewall Policies
+@app.route('/api/vyos/<device_id>/firewall/policies', methods=['GET'])
+def vyos_list_policies(device_id):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies')
+
+@app.route('/api/vyos/<device_id>/firewall/policies', methods=['POST'])
+def vyos_create_policy(device_id):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies', method='POST')
+
+@app.route('/api/vyos/<device_id>/firewall/policies/<policy>', methods=['GET'])
+def vyos_get_policy(device_id, policy):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies/{policy}')
+
+@app.route('/api/vyos/<device_id>/firewall/policies/<policy>', methods=['PUT'])
+def vyos_update_policy(device_id, policy):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies/{policy}', method='PUT')
+
+@app.route('/api/vyos/<device_id>/firewall/policies/<policy>', methods=['DELETE'])
+def vyos_delete_policy(device_id, policy):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies/{policy}', method='DELETE')
+
+@app.route('/api/vyos/<device_id>/firewall/policies/<policy>/rules', methods=['POST'])
+def vyos_add_rule(device_id, policy):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies/{policy}/rules', method='POST')
+
+@app.route('/api/vyos/<device_id>/firewall/policies/<policy>/rules/<rule_id>', methods=['DELETE'])
+def vyos_delete_rule(device_id, policy, rule_id):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies/{policy}/rules/{rule_id}', method='DELETE')
+
+@app.route('/api/vyos/<device_id>/firewall/policies/<policy>/disable', methods=['PUT'])
+def vyos_disable_policy(device_id, policy):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies/{policy}/disable', method='PUT')
+
+@app.route('/api/vyos/<device_id>/firewall/policies/<policy>/enable', methods=['PUT'])
+def vyos_enable_policy(device_id, policy):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies/{policy}/enable', method='PUT')
+
+@app.route('/api/vyos/<device_id>/firewall/policies/<policy>/rules/<rule_id>/disable', methods=['PUT'])
+def vyos_disable_rule(device_id, policy, rule_id):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies/{policy}/rules/{rule_id}/disable', method='PUT')
+
+@app.route('/api/vyos/<device_id>/firewall/policies/<policy>/rules/<rule_id>/enable', methods=['PUT'])
+def vyos_enable_rule(device_id, policy, rule_id):
+    return _vyos_proxy(f'devices/{device_id}/firewall/policies/{policy}/rules/{rule_id}/enable', method='PUT')
+
+
+# Firewall Address Groups
+@app.route('/api/vyos/<device_id>/firewall/address-groups', methods=['GET'])
+def vyos_list_address_groups(device_id):
+    return _vyos_proxy(f'devices/{device_id}/firewall/address-groups')
+
+@app.route('/api/vyos/<device_id>/firewall/address-groups', methods=['POST'])
+def vyos_create_address_group(device_id):
+    return _vyos_proxy(f'devices/{device_id}/firewall/address-groups', method='POST')
+
+@app.route('/api/vyos/<device_id>/firewall/address-groups/<group>', methods=['GET'])
+def vyos_get_address_group(device_id, group):
+    return _vyos_proxy(f'devices/{device_id}/firewall/address-groups/{group}')
+
+@app.route('/api/vyos/<device_id>/firewall/address-groups/<group>', methods=['PUT'])
+def vyos_update_address_group(device_id, group):
+    return _vyos_proxy(f'devices/{device_id}/firewall/address-groups/{group}', method='PUT')
+
+@app.route('/api/vyos/<device_id>/firewall/address-groups/<group>', methods=['DELETE'])
+def vyos_delete_address_group(device_id, group):
+    return _vyos_proxy(f'devices/{device_id}/firewall/address-groups/{group}', method='DELETE')
 
 
 @app.route('/api/vms/<vmid>/vncproxy', methods=['POST'])
