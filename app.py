@@ -1031,6 +1031,28 @@ def vyos_delete_address_group(device_id, group):
     return _vyos_proxy(f'devices/{device_id}/firewall/address-groups/{group}', method='DELETE')
 
 
+# NAT rules (source / destination)
+@app.route('/api/vyos/<device_id>/nat/<nat_type>/rules', methods=['GET'])
+def vyos_list_nat_rules(device_id, nat_type):
+    return _vyos_proxy(f'devices/{device_id}/nat/{nat_type}/rules')
+
+@app.route('/api/vyos/<device_id>/nat/<nat_type>/rules', methods=['POST'])
+def vyos_create_nat_rule(device_id, nat_type):
+    return _vyos_proxy(f'devices/{device_id}/nat/{nat_type}/rules', method='POST')
+
+@app.route('/api/vyos/<device_id>/nat/<nat_type>/rules/<rule_id>', methods=['GET'])
+def vyos_get_nat_rule(device_id, nat_type, rule_id):
+    return _vyos_proxy(f'devices/{device_id}/nat/{nat_type}/rules/{rule_id}')
+
+@app.route('/api/vyos/<device_id>/nat/<nat_type>/rules/<rule_id>', methods=['PUT'])
+def vyos_update_nat_rule(device_id, nat_type, rule_id):
+    return _vyos_proxy(f'devices/{device_id}/nat/{nat_type}/rules/{rule_id}', method='PUT')
+
+@app.route('/api/vyos/<device_id>/nat/<nat_type>/rules/<rule_id>', methods=['DELETE'])
+def vyos_delete_nat_rule(device_id, nat_type, rule_id):
+    return _vyos_proxy(f'devices/{device_id}/nat/{nat_type}/rules/{rule_id}', method='DELETE')
+
+
 @app.route('/api/vms/<vmid>/vncproxy', methods=['POST'])
 def create_vnc_proxy(vmid):
     """Create a VNC proxy ticket for a Proxmox VM"""
