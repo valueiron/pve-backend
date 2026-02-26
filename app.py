@@ -73,6 +73,10 @@ app = Flask(__name__)
 # Allow requests from any origin (you can restrict this in production)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
+# Register labs blueprint
+from labs_routes import labs_bp
+app.register_blueprint(labs_bp)
+
 # --- Prometheus metrics ---
 REQUEST_COUNT = Counter('http_requests_total', 'Total HTTP requests', ['method', 'endpoint'])
 APP_HEALTH = Gauge('app_health_status', 'Health status of the Flask app (1=healthy, 0=unhealthy)')
