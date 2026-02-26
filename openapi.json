@@ -1,0 +1,344 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "PVE Portal Labs API",
+    "description": "Endpoints for managing infrastructure lab repositories and triggering GitHub Actions runs.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/labs/repos": {
+      "get": {
+        "summary": "List configured repositories",
+        "operationId": "listRepos",
+        "tags": ["Repos"],
+        "responses": {
+          "200": {
+            "description": "List of repos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repos": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Repo" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Add a GitHub repository",
+        "operationId": "addRepo",
+        "tags": ["Repos"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AddRepoRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Repo added successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repo": { "$ref": "#/components/schemas/Repo" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/labs/repos/{repo_id}": {
+      "delete": {
+        "summary": "Remove a repository",
+        "operationId": "deleteRepo",
+        "tags": ["Repos"],
+        "parameters": [
+          { "$ref": "#/components/parameters/RepoId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repo deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "deleted": { "type": "boolean" } }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/labs/repos/{repo_id}/sync": {
+      "post": {
+        "summary": "Pull latest changes for a repository",
+        "operationId": "syncRepo",
+        "tags": ["Repos"],
+        "parameters": [
+          { "$ref": "#/components/parameters/RepoId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repo synced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "repo": { "$ref": "#/components/schemas/Repo" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/labs": {
+      "get": {
+        "summary": "List all labs across all repositories",
+        "operationId": "listLabs",
+        "tags": ["Labs"],
+        "responses": {
+          "200": {
+            "description": "List of labs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "labs": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Lab" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/labs/{lab_id}": {
+      "get": {
+        "summary": "Get a single lab",
+        "operationId": "getLab",
+        "tags": ["Labs"],
+        "parameters": [
+          { "$ref": "#/components/parameters/LabId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lab details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "lab": { "$ref": "#/components/schemas/Lab" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/labs/{lab_id}/instructions": {
+      "get": {
+        "summary": "Get lab instructions (instructions.md)",
+        "operationId": "getLabInstructions",
+        "tags": ["Labs"],
+        "parameters": [
+          { "$ref": "#/components/parameters/LabId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Markdown instructions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "instructions": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/labs/{lab_id}/launch": {
+      "post": {
+        "summary": "Trigger a GitHub Actions workflow for this lab",
+        "operationId": "launchLab",
+        "tags": ["Labs"],
+        "parameters": [
+          { "$ref": "#/components/parameters/LabId" }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": ["deploy", "destroy"],
+                    "default": "deploy"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Workflow triggered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "run_triggered": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/labs/{lab_id}/status": {
+      "get": {
+        "summary": "Get the latest GitHub Actions run status for this lab",
+        "operationId": "getLabStatus",
+        "tags": ["Labs"],
+        "parameters": [
+          { "$ref": "#/components/parameters/LabId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RunStatus" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "RepoId": {
+        "name": "repo_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "LabId": {
+        "name": "lab_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      }
+    },
+    "schemas": {
+      "Repo": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "url": { "type": "string" },
+          "branch": { "type": "string" },
+          "last_synced": { "type": "string", "format": "date-time" }
+        }
+      },
+      "AddRepoRequest": {
+        "type": "object",
+        "required": ["name", "url"],
+        "properties": {
+          "name": { "type": "string" },
+          "url": { "type": "string" },
+          "branch": { "type": "string", "default": "main" }
+        }
+      },
+      "Lab": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "repo_id": { "type": "string" },
+          "difficulty": {
+            "type": "string",
+            "enum": ["beginner", "intermediate", "advanced"]
+          },
+          "estimated_time": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "clouds": { "type": "array", "items": { "type": "string" } },
+          "path": { "type": "string" },
+          "lab_path": { "type": "string" }
+        }
+      },
+      "RunStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["idle", "queued", "in_progress", "completed"]
+          },
+          "conclusion": {
+            "type": "string",
+            "nullable": true,
+            "enum": ["success", "failure", "cancelled", null]
+          },
+          "run_id": { "type": "integer", "nullable": true },
+          "html_url": { "type": "string", "nullable": true }
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Error response",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "error": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
