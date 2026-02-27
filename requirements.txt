@@ -5,7 +5,7 @@ flask-cors
 requests
 websocket-client
 websockets
-paramiko
+asyncssh
 azure-identity
 azure-mgmt-compute
 azure-mgmt-resource

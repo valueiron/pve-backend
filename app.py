@@ -12,7 +12,7 @@ import websocket as ws_client
 import websockets
 import requests as http_requests
 import os
-import paramiko
+import asyncssh
 from proxmox_client import get_proxmox_client
 
 # ── SSH terminal session store ─────────────────────────────────────────────────
@@ -27,17 +27,12 @@ _ssh_private_key = None
 
 if SSH_PRIVATE_KEY_PATH:
     try:
-        _ssh_private_key = paramiko.RSAKey.from_private_key_file(SSH_PRIVATE_KEY_PATH)
+        _ssh_private_key = asyncssh.read_private_key(SSH_PRIVATE_KEY_PATH)
         sys.stderr.write(f"[SSH] Loaded private key from {SSH_PRIVATE_KEY_PATH}\n")
         sys.stderr.flush()
     except Exception as e:
-        try:
-            _ssh_private_key = paramiko.Ed25519Key.from_private_key_file(SSH_PRIVATE_KEY_PATH)
-            sys.stderr.write(f"[SSH] Loaded Ed25519 key from {SSH_PRIVATE_KEY_PATH}\n")
-            sys.stderr.flush()
-        except Exception:
-            sys.stderr.write(f"[SSH] WARNING: Failed to load SSH key from {SSH_PRIVATE_KEY_PATH}: {e}\n")
-            sys.stderr.flush()
+        sys.stderr.write(f"[SSH] WARNING: Failed to load SSH key from {SSH_PRIVATE_KEY_PATH}: {e}\n")
+        sys.stderr.flush()
 
 # Docker API base URL - set via DOCKER_API_URL env var (default for local dev)
 DOCKER_API_URL = os.getenv('DOCKER_API_URL', 'http://localhost:8080')
@@ -1289,6 +1284,8 @@ async def vnc_websocket_handler(browser_ws):
 async def ssh_terminal_handler(browser_ws):
     """WebSocket SSH bridge for xterm.js terminal sessions.
     Expects ?sessionId=<uuid> query param. Runs on port 5001."""
+    import json
+
     path = browser_ws.request.path
     params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
     session_id = params.get('sessionId', [None])[0]
@@ -1313,37 +1310,15 @@ async def ssh_terminal_handler(browser_ws):
     sys.stderr.write(f"[SSH WS] Opening SSH terminal: vmid={vmid} ip={ip} user={username}\n")
     sys.stderr.flush()
 
-    loop = asyncio.get_event_loop()
-    shell_channel = None
-    pending_resize = {}
-    channel_ready = asyncio.Event()
-    closed = asyncio.Event()
-
-    # SSH connection runs in a thread pool executor
-    def _connect_ssh():
-        nonlocal shell_channel
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
-            hostname=ip,
+    try:
+        conn = await asyncssh.connect(
+            host=ip,
             port=SSH_PORT,
             username=username,
-            pkey=_ssh_private_key,
-            timeout=10,
-            allow_agent=False,
-            look_for_keys=False,
+            client_keys=[_ssh_private_key],
+            known_hosts=None,
+            connect_timeout=10,
         )
-        cols = pending_resize.get('cols', 80)
-        rows = pending_resize.get('rows', 24)
-        channel = client.invoke_shell(term='xterm-256color', width=cols, height=rows)
-        # Keep blocking mode: recv() blocks until data arrives, which is correct
-        # when dispatched via run_in_executor(). Non-blocking would return b""
-        # immediately and our "if not data: break" would kill the session at once.
-        shell_channel = channel
-        return client
-
-    try:
-        ssh_client_obj = await loop.run_in_executor(None, _connect_ssh)
     except Exception as e:
         sys.stderr.write(f"[SSH WS] Connection failed for session {session_id}: {e}\n")
         sys.stderr.flush()
@@ -1353,99 +1328,78 @@ async def ssh_terminal_handler(browser_ws):
             _ssh_sessions.pop(session_id, None)
         return
 
-    await browser_ws.send(f'{{"type":"connected","sessionId":"{session_id}"}}')
-    channel_ready.set()
-    sys.stderr.write(f"[SSH WS] Shell started for session {session_id}\n")
-    sys.stderr.flush()
+    async with conn:
+        proc = await conn.create_process(
+            term_type='xterm-256color',
+            term_size=(80, 24),
+            encoding=None,
+        )
 
-    # SSH shell → browser
-    async def shell_to_browser():
-        try:
-            while not closed.is_set():
-                try:
-                    data = await loop.run_in_executor(None, shell_channel.recv, 4096)
+        await browser_ws.send(f'{{"type":"connected","sessionId":"{session_id}"}}')
+        sys.stderr.write(f"[SSH WS] Shell started for session {session_id}\n")
+        sys.stderr.flush()
+
+        # SSH shell → browser (pure async, no threads)
+        async def shell_to_browser():
+            try:
+                while True:
+                    data = await proc.stdout.read(65536)
                     if not data:
                         break
-                    await browser_ws.send(bytes(data))
-                except Exception as e:
-                    if not closed.is_set():
-                        sys.stderr.write(f"[SSH WS] Shell->browser error {session_id}: {e}\n")
-                        sys.stderr.flush()
-                    break
-        finally:
-            closed.set()
-            if browser_ws.open:
-                await browser_ws.send('{"type":"disconnected"}')
-                await browser_ws.close(1000, 'SSH shell closed')
-
-    # Browser → SSH shell
-    async def browser_to_shell():
-        try:
-            async for message in browser_ws:
-                if closed.is_set():
-                    break
-                if isinstance(message, str):
+                    await browser_ws.send(data)
+            except Exception as e:
+                sys.stderr.write(f"[SSH WS] Shell->browser error {session_id}: {e}\n")
+                sys.stderr.flush()
+            finally:
+                if browser_ws.open:
                     try:
-                        msg = __import__('json').loads(message)
-                        msg_type = msg.get('type')
-                        if msg_type == 'ping':
-                            await browser_ws.send('{"type":"pong"}')
-                        elif msg_type == 'resize':
-                            cols = msg.get('cols', 80)
-                            rows = msg.get('rows', 24)
-                            pending_resize['cols'] = cols
-                            pending_resize['rows'] = rows
-                            if shell_channel:
-                                await loop.run_in_executor(
-                                    None, shell_channel.resize_pty, cols, rows
-                                )
-                        elif msg_type == 'inject':
-                            data = msg.get('data', '')
-                            if data and shell_channel:
-                                await loop.run_in_executor(
-                                    None, shell_channel.sendall, data.encode('utf-8')
-                                )
-                        else:
-                            if shell_channel:
-                                await loop.run_in_executor(
-                                    None, shell_channel.sendall, message.encode('utf-8')
-                                )
-                    except __import__('json').JSONDecodeError:
-                        if shell_channel:
-                            await loop.run_in_executor(
-                                None, shell_channel.sendall, message.encode('utf-8')
-                            )
-                else:
-                    if shell_channel:
-                        await loop.run_in_executor(None, shell_channel.sendall, bytes(message))
-        except websockets.exceptions.ConnectionClosed:
-            pass
-        except Exception as e:
-            sys.stderr.write(f"[SSH WS] Browser->shell error {session_id}: {e}\n")
-            sys.stderr.flush()
-        finally:
-            closed.set()
-            # Close the channel so the blocking recv() in shell_to_browser unblocks
-            try:
-                shell_channel.close()
-            except Exception:
-                pass
+                        await browser_ws.send('{"type":"disconnected"}')
+                        await browser_ws.close(1000, 'SSH shell closed')
+                    except Exception:
+                        pass
 
-    try:
-        await asyncio.gather(shell_to_browser(), browser_to_shell())
-    finally:
+        # Browser → SSH shell (pure async, no threads)
+        async def browser_to_shell():
+            try:
+                async for message in browser_ws:
+                    if isinstance(message, str):
+                        try:
+                            msg = json.loads(message)
+                            msg_type = msg.get('type')
+                            if msg_type == 'ping':
+                                await browser_ws.send('{"type":"pong"}')
+                            elif msg_type == 'resize':
+                                proc.change_terminal_size(
+                                    msg.get('cols', 80), msg.get('rows', 24)
+                                )
+                            elif msg_type == 'inject':
+                                data = msg.get('data', '')
+                                if data:
+                                    proc.stdin.write(data.encode('utf-8'))
+                            else:
+                                proc.stdin.write(message.encode('utf-8'))
+                        except json.JSONDecodeError:
+                            proc.stdin.write(message.encode('utf-8'))
+                    else:
+                        proc.stdin.write(message)
+            except websockets.exceptions.ConnectionClosed:
+                pass
+            except Exception as e:
+                sys.stderr.write(f"[SSH WS] Browser->shell error {session_id}: {e}\n")
+                sys.stderr.flush()
+            finally:
+                try:
+                    proc.close()
+                except Exception:
+                    pass
+
         try:
-            shell_channel.close()
-        except Exception:
-            pass
-        try:
-            ssh_client_obj.close()
-        except Exception:
-            pass
-        with _ssh_sessions_lock:
-            _ssh_sessions.pop(session_id, None)
-        sys.stderr.write(f"[SSH WS] Session {session_id} ended\n")
-        sys.stderr.flush()
+            await asyncio.gather(shell_to_browser(), browser_to_shell())
+        finally:
+            with _ssh_sessions_lock:
+                _ssh_sessions.pop(session_id, None)
+            sys.stderr.write(f"[SSH WS] Session {session_id} ended\n")
+            sys.stderr.flush()
 
 
 async def _ws_router(websocket):
