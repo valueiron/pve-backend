@@ -144,6 +144,28 @@ def launch_lab(lab_id: str):
         return _err(str(e), 500)
 
 
+@labs_bp.get("/<path:lab_id>/vms")
+def get_lab_vms(lab_id: str):
+    try:
+        vms = lc.get_lab_vms(lab_id)
+        return jsonify({"vms": vms})
+    except Exception as e:
+        return _err(str(e), 500)
+
+
+@labs_bp.post("/<path:lab_id>/vms")
+def register_lab_vms(lab_id: str):
+    body = request.get_json(silent=True) or {}
+    vms = body.get("vms", [])
+    if not isinstance(vms, list):
+        return _err("'vms' must be an array")
+    try:
+        registered = lc.register_lab_vms(lab_id, vms)
+        return jsonify({"vms": registered}), 201
+    except Exception as e:
+        return _err(str(e), 500)
+
+
 @labs_bp.get("/<path:lab_id>/status")
 def get_lab_status(lab_id: str):
     try:

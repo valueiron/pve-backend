@@ -17,6 +17,7 @@ import requests
 import yaml
 
 REPOS_FILE = Path(__file__).parent / "repos.json"
+LAB_VMS_FILE = Path(__file__).parent / "lab_vms.json"
 LABS_DIR = Path(os.getenv("LABS_DIR", "./labs_repos")).resolve()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
@@ -35,6 +36,18 @@ def _load_repos() -> list:
 def _save_repos(repos: list) -> None:
     with REPOS_FILE.open("w") as f:
         json.dump(repos, f, indent=2)
+
+
+def _load_lab_vms() -> dict:
+    if LAB_VMS_FILE.exists():
+        with LAB_VMS_FILE.open() as f:
+            return json.load(f)
+    return {}
+
+
+def _save_lab_vms(data: dict) -> None:
+    with LAB_VMS_FILE.open("w") as f:
+        json.dump(data, f, indent=2)
 
 
 def _repo_dir(repo_id: str) -> Path:
@@ -156,6 +169,16 @@ def _parse_lab_yml(lab_yml_path: Path, repo_id: str) -> dict | None:
 
     lab_id = f"{repo_id}/{relative_path}".replace("/", "_").replace("\\", "_")
 
+    raw_vms = meta.get("vms", [])
+    vms = []
+    for v in raw_vms:
+        if isinstance(v, dict) and "vmid" in v:
+            vms.append({
+                "vmid": int(v["vmid"]),
+                "name": str(v.get("name", f"VM {v['vmid']}")),
+                "source": "static",
+            })
+
     return {
         "id": lab_id,
         "name": meta.get("name", lab_folder.name),
@@ -167,6 +190,7 @@ def _parse_lab_yml(lab_yml_path: Path, repo_id: str) -> dict | None:
         "clouds": meta.get("clouds", []),
         "path": relative_path,
         "lab_path": str(lab_folder),
+        "vms": vms,
     }
 
 
@@ -200,6 +224,42 @@ def get_lab_instructions(lab_id: str) -> str:
     if not instructions_path.exists():
         return "# No instructions found\n\nThis lab does not have an `instructions.md` file."
     return instructions_path.read_text()
+
+
+def register_lab_vms(lab_id: str, vms: list) -> list:
+    """Store dynamically posted VMs (from GitHub Actions). Replaces previous dynamic entries."""
+    data = _load_lab_vms()
+    validated = []
+    for v in vms:
+        if not isinstance(v, dict) or "vmid" not in v:
+            continue
+        validated.append({
+            "vmid": int(v["vmid"]),
+            "name": str(v.get("name", f"VM {v['vmid']}")),
+            "source": "dynamic",
+            "registered_at": _now_iso(),
+        })
+    data[lab_id] = validated
+    _save_lab_vms(data)
+    return validated
+
+
+def get_lab_vms(lab_id: str) -> list:
+    """Merge static VMs (from lab.yml) + dynamic VMs (registered by GitHub Actions)."""
+    try:
+        lab = get_lab(lab_id)
+        static_vms = lab.get("vms", [])
+    except KeyError:
+        static_vms = []
+
+    data = _load_lab_vms()
+    dynamic_vms = data.get(lab_id, [])
+
+    # Dynamic overrides static for same vmid
+    merged = {v["vmid"]: v for v in static_vms}
+    for v in dynamic_vms:
+        merged[v["vmid"]] = v
+    return list(merged.values())
 
 
 # ---------------------------------------------------------------------------
