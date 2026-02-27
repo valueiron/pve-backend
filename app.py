@@ -1061,6 +1061,50 @@ def vyos_delete_nat_rule(device_id, nat_type, rule_id):
     return _vyos_proxy(f'devices/{device_id}/nat/{nat_type}/rules/{rule_id}', method='DELETE')
 
 
+# Static routes
+@app.route('/api/vyos/<device_id>/routes', methods=['GET'])
+def vyos_list_routes(device_id):
+    return _vyos_proxy(f'devices/{device_id}/routes')
+
+@app.route('/api/vyos/<device_id>/routes', methods=['POST'])
+def vyos_create_route(device_id):
+    return _vyos_proxy(f'devices/{device_id}/routes', method='POST')
+
+@app.route('/api/vyos/<device_id>/routes/<prefix>/<mask>', methods=['GET'])
+def vyos_get_route(device_id, prefix, mask):
+    return _vyos_proxy(f'devices/{device_id}/routes/{prefix}/{mask}')
+
+@app.route('/api/vyos/<device_id>/routes/<prefix>/<mask>', methods=['PUT'])
+def vyos_update_route(device_id, prefix, mask):
+    return _vyos_proxy(f'devices/{device_id}/routes/{prefix}/{mask}', method='PUT')
+
+@app.route('/api/vyos/<device_id>/routes/<prefix>/<mask>', methods=['DELETE'])
+def vyos_delete_route(device_id, prefix, mask):
+    return _vyos_proxy(f'devices/{device_id}/routes/{prefix}/{mask}', method='DELETE')
+
+
+# DHCP servers
+@app.route('/api/vyos/<device_id>/dhcp/servers', methods=['GET'])
+def vyos_list_dhcp_servers(device_id):
+    return _vyos_proxy(f'devices/{device_id}/dhcp/servers')
+
+@app.route('/api/vyos/<device_id>/dhcp/servers', methods=['POST'])
+def vyos_create_dhcp_server(device_id):
+    return _vyos_proxy(f'devices/{device_id}/dhcp/servers', method='POST')
+
+@app.route('/api/vyos/<device_id>/dhcp/servers/<name>', methods=['GET'])
+def vyos_get_dhcp_server(device_id, name):
+    return _vyos_proxy(f'devices/{device_id}/dhcp/servers/{name}')
+
+@app.route('/api/vyos/<device_id>/dhcp/servers/<name>', methods=['PUT'])
+def vyos_update_dhcp_server(device_id, name):
+    return _vyos_proxy(f'devices/{device_id}/dhcp/servers/{name}', method='PUT')
+
+@app.route('/api/vyos/<device_id>/dhcp/servers/<name>', methods=['DELETE'])
+def vyos_delete_dhcp_server(device_id, name):
+    return _vyos_proxy(f'devices/{device_id}/dhcp/servers/{name}', method='DELETE')
+
+
 @app.route('/api/vms/<vmid>/vncproxy', methods=['POST'])
 def create_vnc_proxy(vmid):
     """Create a VNC proxy ticket for a Proxmox VM"""
