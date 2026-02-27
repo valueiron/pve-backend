@@ -77,6 +77,10 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 from labs_routes import labs_bp
 app.register_blueprint(labs_bp)
 
+# Register DNS blueprint
+from dns_routes import dns_bp
+app.register_blueprint(dns_bp)
+
 # --- Prometheus metrics ---
 REQUEST_COUNT = Counter('http_requests_total', 'Total HTTP requests', ['method', 'endpoint'])
 APP_HEALTH = Gauge('app_health_status', 'Health status of the Flask app (1=healthy, 0=unhealthy)')
