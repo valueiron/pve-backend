@@ -1,11 +1,1450 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "PVE Portal Labs API",
-    "description": "Endpoints for managing infrastructure lab repositories and triggering GitHub Actions runs.",
+    "title": "PVE Portal API",
+    "description": "API for managing infrastructure: Proxmox VMs, Azure, AWS, Docker, Kubernetes, VyOS networking, and Labs.",
     "version": "1.0.0"
   },
+  "tags": [
+    { "name": "System", "description": "Health and metrics endpoints" },
+    { "name": "VMs", "description": "Virtual machine management (Proxmox, Azure, AWS)" },
+    { "name": "Nodes", "description": "Proxmox node information" },
+    { "name": "Cloud Status", "description": "Cloud provider connectivity diagnostics" },
+    { "name": "Networking", "description": "Cloud networking resources" },
+    { "name": "Storage", "description": "Cloud and Proxmox storage resources" },
+    { "name": "Docker", "description": "Docker container management (proxied)" },
+    { "name": "Kubernetes", "description": "Kubernetes resource management (proxied)" },
+    { "name": "VyOS", "description": "VyOS network device management (proxied)" },
+    { "name": "Repos", "description": "Lab repository management" },
+    { "name": "Labs", "description": "Infrastructure lab management" }
+  ],
   "paths": {
+    "/": {
+      "get": {
+        "summary": "API root",
+        "operationId": "home",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "API is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string" },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Liveness check",
+        "operationId": "health",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "Healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "status": { "type": "string" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Readiness check",
+        "operationId": "ready",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "Ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "status": { "type": "string" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Prometheus metrics",
+        "operationId": "metrics",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "Prometheus text format metrics",
+            "content": { "text/plain": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/api/vms": {
+      "get": {
+        "summary": "List all VMs",
+        "description": "Returns all VMs across Proxmox, Azure, and AWS. Each VM includes a `type` field indicating the provider.",
+        "operationId": "listVMs",
+        "tags": ["VMs"],
+        "responses": {
+          "200": {
+            "description": "List of VMs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "vms": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/VM" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vms/{vmid}": {
+      "get": {
+        "summary": "Get VM details",
+        "description": "Prefix `azure-` for Azure VMs, `aws-` for AWS instances, or a numeric ID for Proxmox VMs.",
+        "operationId": "getVM",
+        "tags": ["VMs"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VMId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "VM details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/VM" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vms/{vmid}/start": {
+      "post": {
+        "summary": "Start a VM",
+        "operationId": "startVM",
+        "tags": ["VMs"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VMId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "VM started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "data": { "type": "object" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vms/{vmid}/shutdown": {
+      "post": {
+        "summary": "Shutdown a VM",
+        "operationId": "shutdownVM",
+        "tags": ["VMs"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VMId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "VM shutdown initiated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "data": { "type": "object" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vms/{vmid}/vncproxy": {
+      "post": {
+        "summary": "Create VNC proxy ticket",
+        "description": "Creates a VNC proxy ticket for a Proxmox VM (numeric ID only).",
+        "operationId": "createVNCProxy",
+        "tags": ["VMs"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VMId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "VNC proxy details",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/nodes": {
+      "get": {
+        "summary": "List Proxmox nodes",
+        "operationId": "listNodes",
+        "tags": ["Nodes"],
+        "responses": {
+          "200": {
+            "description": "List of Proxmox nodes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nodes": {
+                      "type": "array",
+                      "items": { "type": "object" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/azure/status": {
+      "get": {
+        "summary": "Azure connectivity status",
+        "description": "Diagnostic endpoint showing Azure credential configuration and connectivity.",
+        "operationId": "azureStatus",
+        "tags": ["Cloud Status"],
+        "responses": {
+          "200": {
+            "description": "Azure status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CloudStatus" }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/aws/status": {
+      "get": {
+        "summary": "AWS connectivity status",
+        "description": "Diagnostic endpoint showing AWS credential configuration and connectivity.",
+        "operationId": "awsStatus",
+        "tags": ["Cloud Status"],
+        "responses": {
+          "200": {
+            "description": "AWS status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CloudStatus" }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/networking": {
+      "get": {
+        "summary": "List networking resources",
+        "description": "Returns networking resources from Azure (VNets, subnets, NSGs, public IPs) and AWS (VPCs, subnets, security groups, elastic IPs).",
+        "operationId": "listNetworking",
+        "tags": ["Networking"],
+        "responses": {
+          "200": {
+            "description": "Networking resources",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "vnets": { "type": "array", "items": { "type": "object" } },
+                    "subnets": { "type": "array", "items": { "type": "object" } },
+                    "nsgs": { "type": "array", "items": { "type": "object" } },
+                    "public_ips": { "type": "array", "items": { "type": "object" } },
+                    "vpcs": { "type": "array", "items": { "type": "object" } },
+                    "security_groups": { "type": "array", "items": { "type": "object" } },
+                    "elastic_ips": { "type": "array", "items": { "type": "object" } }
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/storage": {
+      "get": {
+        "summary": "List storage resources",
+        "description": "Returns storage resources from Proxmox, Azure (storage accounts, containers), and AWS (S3 buckets).",
+        "operationId": "listStorage",
+        "tags": ["Storage"],
+        "responses": {
+          "200": {
+            "description": "Storage resources",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "storage_accounts": { "type": "array", "items": { "type": "object" } },
+                    "containers": { "type": "array", "items": { "type": "object" } },
+                    "buckets": { "type": "array", "items": { "type": "object" } },
+                    "storages": { "type": "array", "items": { "type": "object" } }
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/containers": {
+      "get": {
+        "summary": "List Docker containers",
+        "operationId": "dockerListContainers",
+        "tags": ["Docker"],
+        "responses": {
+          "200": { "description": "List of containers", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/containers/{container_id}": {
+      "get": {
+        "summary": "Inspect a Docker container",
+        "operationId": "dockerInspectContainer",
+        "tags": ["Docker"],
+        "parameters": [ { "$ref": "#/components/parameters/ContainerId" } ],
+        "responses": {
+          "200": { "description": "Container details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/containers/{container_id}/start": {
+      "post": {
+        "summary": "Start a Docker container",
+        "operationId": "dockerStartContainer",
+        "tags": ["Docker"],
+        "parameters": [ { "$ref": "#/components/parameters/ContainerId" } ],
+        "responses": {
+          "200": { "description": "Container started", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/containers/{container_id}/stop": {
+      "post": {
+        "summary": "Stop a Docker container",
+        "operationId": "dockerStopContainer",
+        "tags": ["Docker"],
+        "parameters": [ { "$ref": "#/components/parameters/ContainerId" } ],
+        "responses": {
+          "200": { "description": "Container stopped", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/containers/{container_id}/restart": {
+      "post": {
+        "summary": "Restart a Docker container",
+        "operationId": "dockerRestartContainer",
+        "tags": ["Docker"],
+        "parameters": [ { "$ref": "#/components/parameters/ContainerId" } ],
+        "responses": {
+          "200": { "description": "Container restarted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/containers/{container_id}/logs": {
+      "get": {
+        "summary": "Get Docker container logs",
+        "operationId": "dockerContainerLogs",
+        "tags": ["Docker"],
+        "parameters": [ { "$ref": "#/components/parameters/ContainerId" } ],
+        "responses": {
+          "200": { "description": "Container logs", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/containers/{container_id}/metrics": {
+      "get": {
+        "summary": "Get Docker container metrics",
+        "operationId": "dockerContainerMetrics",
+        "tags": ["Docker"],
+        "parameters": [ { "$ref": "#/components/parameters/ContainerId" } ],
+        "responses": {
+          "200": { "description": "Container metrics", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/images": {
+      "get": {
+        "summary": "List Docker images",
+        "operationId": "dockerListImages",
+        "tags": ["Docker"],
+        "responses": {
+          "200": { "description": "List of images", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/images/{image_id}": {
+      "get": {
+        "summary": "Inspect a Docker image",
+        "operationId": "dockerInspectImage",
+        "tags": ["Docker"],
+        "parameters": [
+          { "name": "image_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Image details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/volumes": {
+      "get": {
+        "summary": "List Docker volumes",
+        "operationId": "dockerListVolumes",
+        "tags": ["Docker"],
+        "responses": {
+          "200": { "description": "List of volumes", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/volumes/{vol_name}": {
+      "get": {
+        "summary": "Inspect a Docker volume",
+        "operationId": "dockerInspectVolume",
+        "tags": ["Docker"],
+        "parameters": [
+          { "name": "vol_name", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Volume details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/networks": {
+      "get": {
+        "summary": "List Docker networks",
+        "operationId": "dockerListNetworks",
+        "tags": ["Docker"],
+        "responses": {
+          "200": { "description": "List of networks", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/networks/{net_id}": {
+      "get": {
+        "summary": "Inspect a Docker network",
+        "operationId": "dockerInspectNetwork",
+        "tags": ["Docker"],
+        "parameters": [
+          { "name": "net_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Network details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/system/info": {
+      "get": {
+        "summary": "Docker system info",
+        "operationId": "dockerSystemInfo",
+        "tags": ["Docker"],
+        "responses": {
+          "200": { "description": "Docker system information", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/docker/system/disk": {
+      "get": {
+        "summary": "Docker disk usage",
+        "operationId": "dockerSystemDisk",
+        "tags": ["Docker"],
+        "responses": {
+          "200": { "description": "Docker disk usage", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/pods": {
+      "get": {
+        "summary": "List pods",
+        "operationId": "k8sListPods",
+        "tags": ["Kubernetes"],
+        "responses": {
+          "200": { "description": "List of pods", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/pods/{namespace}/{name}": {
+      "get": {
+        "summary": "Get a pod",
+        "operationId": "k8sGetPod",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Pod details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a pod",
+        "operationId": "k8sDeletePod",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Pod deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/pods/{namespace}/{name}/logs": {
+      "get": {
+        "summary": "Get pod logs",
+        "operationId": "k8sPodLogs",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Pod logs", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/pods/{namespace}/{name}/metrics": {
+      "get": {
+        "summary": "Get pod metrics",
+        "operationId": "k8sPodMetrics",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Pod metrics", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/pods/{namespace}/{name}/restart": {
+      "post": {
+        "summary": "Restart a pod",
+        "operationId": "k8sRestartPod",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Pod restarted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/deployments": {
+      "get": {
+        "summary": "List deployments",
+        "operationId": "k8sListDeployments",
+        "tags": ["Kubernetes"],
+        "responses": {
+          "200": { "description": "List of deployments", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a deployment",
+        "operationId": "k8sCreateDeployment",
+        "tags": ["Kubernetes"],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "200": { "description": "Deployment created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/deployments/{namespace}/{name}": {
+      "get": {
+        "summary": "Get a deployment",
+        "operationId": "k8sGetDeployment",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Deployment details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a deployment",
+        "operationId": "k8sDeleteDeployment",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Deployment deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/deployments/{namespace}/{name}/scale": {
+      "post": {
+        "summary": "Scale a deployment",
+        "operationId": "k8sScaleDeployment",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "200": { "description": "Deployment scaled", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/deployments/{namespace}/{name}/restart": {
+      "post": {
+        "summary": "Restart a deployment",
+        "operationId": "k8sRestartDeployment",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Deployment restarted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/services": {
+      "get": {
+        "summary": "List services",
+        "operationId": "k8sListServices",
+        "tags": ["Kubernetes"],
+        "responses": {
+          "200": { "description": "List of services", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a service",
+        "operationId": "k8sCreateService",
+        "tags": ["Kubernetes"],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "200": { "description": "Service created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/services/{namespace}/{name}": {
+      "get": {
+        "summary": "Get a service",
+        "operationId": "k8sGetService",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Service details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a service",
+        "operationId": "k8sDeleteService",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "Service deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/namespaces": {
+      "get": {
+        "summary": "List namespaces",
+        "operationId": "k8sListNamespaces",
+        "tags": ["Kubernetes"],
+        "responses": {
+          "200": { "description": "List of namespaces", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a namespace",
+        "operationId": "k8sCreateNamespace",
+        "tags": ["Kubernetes"],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "200": { "description": "Namespace created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/namespaces/{name}": {
+      "get": {
+        "summary": "Get a namespace",
+        "operationId": "k8sGetNamespace",
+        "tags": ["Kubernetes"],
+        "parameters": [ { "$ref": "#/components/parameters/K8sName" } ],
+        "responses": {
+          "200": { "description": "Namespace details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a namespace",
+        "operationId": "k8sDeleteNamespace",
+        "tags": ["Kubernetes"],
+        "parameters": [ { "$ref": "#/components/parameters/K8sName" } ],
+        "responses": {
+          "200": { "description": "Namespace deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/configmaps": {
+      "get": {
+        "summary": "List ConfigMaps",
+        "operationId": "k8sListConfigMaps",
+        "tags": ["Kubernetes"],
+        "responses": {
+          "200": { "description": "List of ConfigMaps", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a ConfigMap",
+        "operationId": "k8sCreateConfigMap",
+        "tags": ["Kubernetes"],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "200": { "description": "ConfigMap created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/configmaps/{namespace}/{name}": {
+      "get": {
+        "summary": "Get a ConfigMap",
+        "operationId": "k8sGetConfigMap",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "ConfigMap details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a ConfigMap",
+        "operationId": "k8sDeleteConfigMap",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "ConfigMap deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/pvcs": {
+      "get": {
+        "summary": "List PersistentVolumeClaims",
+        "operationId": "k8sListPVCs",
+        "tags": ["Kubernetes"],
+        "responses": {
+          "200": { "description": "List of PVCs", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a PersistentVolumeClaim",
+        "operationId": "k8sCreatePVC",
+        "tags": ["Kubernetes"],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object" } } }
+        },
+        "responses": {
+          "200": { "description": "PVC created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/pvcs/{namespace}/{name}": {
+      "get": {
+        "summary": "Get a PVC",
+        "operationId": "k8sGetPVC",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "PVC details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a PVC",
+        "operationId": "k8sDeletePVC",
+        "tags": ["Kubernetes"],
+        "parameters": [
+          { "$ref": "#/components/parameters/K8sNamespace" },
+          { "$ref": "#/components/parameters/K8sName" }
+        ],
+        "responses": {
+          "200": { "description": "PVC deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/nodes": {
+      "get": {
+        "summary": "List Kubernetes nodes",
+        "operationId": "k8sListNodes",
+        "tags": ["Kubernetes"],
+        "responses": {
+          "200": { "description": "List of nodes", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/nodes/{name}": {
+      "get": {
+        "summary": "Get a Kubernetes node",
+        "operationId": "k8sGetNode",
+        "tags": ["Kubernetes"],
+        "parameters": [ { "$ref": "#/components/parameters/K8sName" } ],
+        "responses": {
+          "200": { "description": "Node details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/k8s/system/info": {
+      "get": {
+        "summary": "Kubernetes system info",
+        "operationId": "k8sSystemInfo",
+        "tags": ["Kubernetes"],
+        "responses": {
+          "200": { "description": "Kubernetes system information", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/devices": {
+      "get": {
+        "summary": "List VyOS devices",
+        "operationId": "vyosListDevices",
+        "tags": ["VyOS"],
+        "responses": {
+          "200": { "description": "List of VyOS devices", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/networks": {
+      "get": {
+        "summary": "List VyOS network interfaces",
+        "operationId": "vyosListNetworks",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "responses": {
+          "200": { "description": "List of interfaces", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a VyOS network interface",
+        "operationId": "vyosCreateNetwork",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "Interface created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/networks/{interface}": {
+      "get": {
+        "summary": "Get a VyOS network interface",
+        "operationId": "vyosGetNetwork",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "interface", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Interface details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "summary": "Update a VyOS network interface",
+        "operationId": "vyosUpdateNetwork",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "interface", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "Interface updated", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a VyOS network interface",
+        "operationId": "vyosDeleteNetwork",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "interface", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Interface deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/vrfs": {
+      "get": {
+        "summary": "List VRFs",
+        "operationId": "vyosListVRFs",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "responses": {
+          "200": { "description": "List of VRFs", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a VRF",
+        "operationId": "vyosCreateVRF",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "VRF created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/vrfs/{vrf}": {
+      "get": {
+        "summary": "Get a VRF",
+        "operationId": "vyosGetVRF",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "vrf", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "VRF details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "summary": "Update a VRF",
+        "operationId": "vyosUpdateVRF",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "vrf", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "VRF updated", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a VRF",
+        "operationId": "vyosDeleteVRF",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "vrf", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "VRF deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/vlans": {
+      "get": {
+        "summary": "List VLANs",
+        "operationId": "vyosListVLANs",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "responses": {
+          "200": { "description": "List of VLANs", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a VLAN",
+        "operationId": "vyosCreateVLAN",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "VLAN created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/vlans/{interface}/{vlan_id}": {
+      "get": {
+        "summary": "Get a VLAN",
+        "operationId": "vyosGetVLAN",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "interface", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "vlan_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "VLAN details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "summary": "Update a VLAN",
+        "operationId": "vyosUpdateVLAN",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "interface", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "vlan_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "VLAN updated", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a VLAN",
+        "operationId": "vyosDeleteVLAN",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "interface", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "vlan_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "VLAN deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/policies": {
+      "get": {
+        "summary": "List firewall policies",
+        "operationId": "vyosListPolicies",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "responses": {
+          "200": { "description": "List of firewall policies", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a firewall policy",
+        "operationId": "vyosCreatePolicy",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "Policy created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/policies/{policy}": {
+      "get": {
+        "summary": "Get a firewall policy",
+        "operationId": "vyosGetPolicy",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSPolicy" }
+        ],
+        "responses": {
+          "200": { "description": "Policy details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "summary": "Update a firewall policy",
+        "operationId": "vyosUpdatePolicy",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSPolicy" }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "Policy updated", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a firewall policy",
+        "operationId": "vyosDeletePolicy",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSPolicy" }
+        ],
+        "responses": {
+          "200": { "description": "Policy deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/policies/{policy}/rules": {
+      "post": {
+        "summary": "Add a firewall rule",
+        "operationId": "vyosAddRule",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSPolicy" }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "Rule added", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/policies/{policy}/rules/{rule_id}": {
+      "delete": {
+        "summary": "Delete a firewall rule",
+        "operationId": "vyosDeleteRule",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSPolicy" },
+          { "$ref": "#/components/parameters/VyOSRuleId" }
+        ],
+        "responses": {
+          "200": { "description": "Rule deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/policies/{policy}/disable": {
+      "put": {
+        "summary": "Disable a firewall policy",
+        "operationId": "vyosDisablePolicy",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSPolicy" }
+        ],
+        "responses": {
+          "200": { "description": "Policy disabled", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/policies/{policy}/enable": {
+      "put": {
+        "summary": "Enable a firewall policy",
+        "operationId": "vyosEnablePolicy",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSPolicy" }
+        ],
+        "responses": {
+          "200": { "description": "Policy enabled", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/policies/{policy}/rules/{rule_id}/disable": {
+      "put": {
+        "summary": "Disable a firewall rule",
+        "operationId": "vyosDisableRule",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSPolicy" },
+          { "$ref": "#/components/parameters/VyOSRuleId" }
+        ],
+        "responses": {
+          "200": { "description": "Rule disabled", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/policies/{policy}/rules/{rule_id}/enable": {
+      "put": {
+        "summary": "Enable a firewall rule",
+        "operationId": "vyosEnableRule",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSPolicy" },
+          { "$ref": "#/components/parameters/VyOSRuleId" }
+        ],
+        "responses": {
+          "200": { "description": "Rule enabled", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/address-groups": {
+      "get": {
+        "summary": "List firewall address groups",
+        "operationId": "vyosListAddressGroups",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "responses": {
+          "200": { "description": "List of address groups", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a firewall address group",
+        "operationId": "vyosCreateAddressGroup",
+        "tags": ["VyOS"],
+        "parameters": [ { "$ref": "#/components/parameters/VyOSDeviceId" } ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "Address group created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/firewall/address-groups/{group}": {
+      "get": {
+        "summary": "Get a firewall address group",
+        "operationId": "vyosGetAddressGroup",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "group", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Address group details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "summary": "Update a firewall address group",
+        "operationId": "vyosUpdateAddressGroup",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "group", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "Address group updated", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a firewall address group",
+        "operationId": "vyosDeleteAddressGroup",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "name": "group", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Address group deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/nat/{nat_type}/rules": {
+      "get": {
+        "summary": "List NAT rules",
+        "operationId": "vyosListNATRules",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSNatType" }
+        ],
+        "responses": {
+          "200": { "description": "List of NAT rules", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "summary": "Create a NAT rule",
+        "operationId": "vyosCreateNATRule",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSNatType" }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "NAT rule created", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/vyos/{device_id}/nat/{nat_type}/rules/{rule_id}": {
+      "get": {
+        "summary": "Get a NAT rule",
+        "operationId": "vyosGetNATRule",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSNatType" },
+          { "$ref": "#/components/parameters/VyOSRuleId" }
+        ],
+        "responses": {
+          "200": { "description": "NAT rule details", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "summary": "Update a NAT rule",
+        "operationId": "vyosUpdateNATRule",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSNatType" },
+          { "$ref": "#/components/parameters/VyOSRuleId" }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "NAT rule updated", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a NAT rule",
+        "operationId": "vyosDeleteNATRule",
+        "tags": ["VyOS"],
+        "parameters": [
+          { "$ref": "#/components/parameters/VyOSDeviceId" },
+          { "$ref": "#/components/parameters/VyOSNatType" },
+          { "$ref": "#/components/parameters/VyOSRuleId" }
+        ],
+        "responses": {
+          "200": { "description": "NAT rule deleted", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/api/labs/repos": {
       "get": {
         "summary": "List configured repositories",
@@ -19,15 +1458,13 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "repos": {
-                      "type": "array",
-                      "items": { "$ref": "#/components/schemas/Repo" }
-                    }
+                    "repos": { "type": "array", "items": { "$ref": "#/components/schemas/Repo" } }
                   }
                 }
               }
             }
-          }
+          },
+          "500": { "$ref": "#/components/responses/Error" }
         }
       },
       "post": {
@@ -49,15 +1486,14 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "properties": {
-                    "repo": { "$ref": "#/components/schemas/Repo" }
-                  }
+                  "properties": { "repo": { "$ref": "#/components/schemas/Repo" } }
                 }
               }
             }
           },
           "400": { "$ref": "#/components/responses/Error" },
-          "422": { "$ref": "#/components/responses/Error" }
+          "422": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
         }
       }
     },
@@ -66,9 +1502,7 @@
         "summary": "Remove a repository",
         "operationId": "deleteRepo",
         "tags": ["Repos"],
-        "parameters": [
-          { "$ref": "#/components/parameters/RepoId" }
-        ],
+        "parameters": [ { "$ref": "#/components/parameters/RepoId" } ],
         "responses": {
           "200": {
             "description": "Repo deleted",
@@ -90,9 +1524,7 @@
         "summary": "Pull latest changes for a repository",
         "operationId": "syncRepo",
         "tags": ["Repos"],
-        "parameters": [
-          { "$ref": "#/components/parameters/RepoId" }
-        ],
+        "parameters": [ { "$ref": "#/components/parameters/RepoId" } ],
         "responses": {
           "200": {
             "description": "Repo synced",
@@ -100,15 +1532,14 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "properties": {
-                    "repo": { "$ref": "#/components/schemas/Repo" }
-                  }
+                  "properties": { "repo": { "$ref": "#/components/schemas/Repo" } }
                 }
               }
             }
           },
           "404": { "$ref": "#/components/responses/Error" },
-          "422": { "$ref": "#/components/responses/Error" }
+          "422": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
         }
       }
     },
@@ -125,15 +1556,13 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "labs": {
-                      "type": "array",
-                      "items": { "$ref": "#/components/schemas/Lab" }
-                    }
+                    "labs": { "type": "array", "items": { "$ref": "#/components/schemas/Lab" } }
                   }
                 }
               }
             }
-          }
+          },
+          "500": { "$ref": "#/components/responses/Error" }
         }
       }
     },
@@ -142,9 +1571,7 @@
         "summary": "Get a single lab",
         "operationId": "getLab",
         "tags": ["Labs"],
-        "parameters": [
-          { "$ref": "#/components/parameters/LabId" }
-        ],
+        "parameters": [ { "$ref": "#/components/parameters/LabId" } ],
         "responses": {
           "200": {
             "description": "Lab details",
@@ -152,14 +1579,13 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "properties": {
-                    "lab": { "$ref": "#/components/schemas/Lab" }
-                  }
+                  "properties": { "lab": { "$ref": "#/components/schemas/Lab" } }
                 }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/Error" }
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
         }
       }
     },
@@ -168,9 +1594,7 @@
         "summary": "Get lab instructions (instructions.md)",
         "operationId": "getLabInstructions",
         "tags": ["Labs"],
-        "parameters": [
-          { "$ref": "#/components/parameters/LabId" }
-        ],
+        "parameters": [ { "$ref": "#/components/parameters/LabId" } ],
         "responses": {
           "200": {
             "description": "Markdown instructions",
@@ -178,14 +1602,13 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "properties": {
-                    "instructions": { "type": "string" }
-                  }
+                  "properties": { "instructions": { "type": "string" } }
                 }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/Error" }
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
         }
       }
     },
@@ -194,9 +1617,7 @@
         "summary": "Trigger a GitHub Actions workflow for this lab",
         "operationId": "launchLab",
         "tags": ["Labs"],
-        "parameters": [
-          { "$ref": "#/components/parameters/LabId" }
-        ],
+        "parameters": [ { "$ref": "#/components/parameters/LabId" } ],
         "requestBody": {
           "required": false,
           "content": {
@@ -221,15 +1642,14 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "properties": {
-                    "run_triggered": { "type": "boolean" }
-                  }
+                  "properties": { "run_triggered": { "type": "boolean" } }
                 }
               }
             }
           },
           "404": { "$ref": "#/components/responses/Error" },
-          "422": { "$ref": "#/components/responses/Error" }
+          "422": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
         }
       }
     },
@@ -238,9 +1658,7 @@
         "summary": "Get the latest GitHub Actions run status for this lab",
         "operationId": "getLabStatus",
         "tags": ["Labs"],
-        "parameters": [
-          { "$ref": "#/components/parameters/LabId" }
-        ],
+        "parameters": [ { "$ref": "#/components/parameters/LabId" } ],
         "responses": {
           "200": {
             "description": "Run status",
@@ -250,13 +1668,65 @@
               }
             }
           },
-          "404": { "$ref": "#/components/responses/Error" }
+          "404": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
         }
       }
     }
   },
   "components": {
     "parameters": {
+      "VMId": {
+        "name": "vmid",
+        "in": "path",
+        "required": true,
+        "description": "VM identifier. Use `azure-<id>` for Azure, `aws-<id>` for AWS, or a numeric ID for Proxmox.",
+        "schema": { "type": "string" }
+      },
+      "ContainerId": {
+        "name": "container_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "K8sNamespace": {
+        "name": "namespace",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "K8sName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "VyOSDeviceId": {
+        "name": "device_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "VyOSPolicy": {
+        "name": "policy",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "VyOSRuleId": {
+        "name": "rule_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "VyOSNatType": {
+        "name": "nat_type",
+        "in": "path",
+        "required": true,
+        "description": "NAT type: `source` or `destination`",
+        "schema": { "type": "string", "enum": ["source", "destination"] }
+      },
       "RepoId": {
         "name": "repo_id",
         "in": "path",
@@ -271,6 +1741,25 @@
       }
     },
     "schemas": {
+      "VM": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "enum": ["proxmox", "azure", "aws"] }
+        },
+        "additionalProperties": true
+      },
+      "CloudStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["connected", "not_configured", "error"]
+          },
+          "message": { "type": "string" },
+          "environment_variables": { "type": "object" }
+        },
+        "additionalProperties": true
+      },
       "Repo": {
         "type": "object",
         "properties": {
