@@ -7,11 +7,37 @@ import ssl
 import asyncio
 import threading
 import urllib.parse
+import uuid
 import websocket as ws_client
 import websockets
 import requests as http_requests
 import os
+import paramiko
 from proxmox_client import get_proxmox_client
+
+# ── SSH terminal session store ─────────────────────────────────────────────────
+_ssh_sessions = {}
+_ssh_sessions_lock = threading.Lock()
+
+# SSH credentials loaded at startup
+SSH_USERNAME = os.getenv('SSH_USERNAME', '')
+SSH_PRIVATE_KEY_PATH = os.getenv('SSH_PRIVATE_KEY_PATH', '')
+SSH_PORT = int(os.getenv('SSH_PORT', '22'))
+_ssh_private_key = None
+
+if SSH_PRIVATE_KEY_PATH:
+    try:
+        _ssh_private_key = paramiko.RSAKey.from_private_key_file(SSH_PRIVATE_KEY_PATH)
+        sys.stderr.write(f"[SSH] Loaded private key from {SSH_PRIVATE_KEY_PATH}\n")
+        sys.stderr.flush()
+    except Exception as e:
+        try:
+            _ssh_private_key = paramiko.Ed25519Key.from_private_key_file(SSH_PRIVATE_KEY_PATH)
+            sys.stderr.write(f"[SSH] Loaded Ed25519 key from {SSH_PRIVATE_KEY_PATH}\n")
+            sys.stderr.flush()
+        except Exception:
+            sys.stderr.write(f"[SSH] WARNING: Failed to load SSH key from {SSH_PRIVATE_KEY_PATH}: {e}\n")
+            sys.stderr.flush()
 
 # Docker API base URL - set via DOCKER_API_URL env var (default for local dev)
 DOCKER_API_URL = os.getenv('DOCKER_API_URL', 'http://localhost:8080')
@@ -1125,6 +1151,48 @@ def create_vnc_proxy(vmid):
         return jsonify({"error": f"Failed to create VNC proxy: {str(e)}"}), 500
 
 
+@app.route('/api/vms/<vmid>/terminal', methods=['POST'])
+def create_terminal_session(vmid):
+    """Create an SSH terminal session for a VM. Returns a sessionId for the WebSocket."""
+    if not SSH_USERNAME:
+        return jsonify({"error": "SSH_USERNAME is not configured on the backend"}), 500
+    if not _ssh_private_key:
+        return jsonify({"error": "SSH private key is not available (check SSH_PRIVATE_KEY_PATH)"}), 500
+
+    try:
+        vmid_int = int(vmid)
+    except ValueError:
+        return jsonify({"error": f"Invalid vmid: {vmid}"}), 400
+
+    try:
+        proxmox = get_proxmox_client()
+        node = proxmox._find_vm_node(vmid_int)
+        ips = proxmox._get_vm_ip_addresses(vmid_int, node)
+        if not ips:
+            return jsonify({"error": f"Could not resolve IP for VM {vmid} — ensure the guest agent is running"}), 400
+        ip = ips[0]
+
+        session_id = str(uuid.uuid4())
+        with _ssh_sessions_lock:
+            _ssh_sessions[session_id] = {
+                'vmid': vmid_int,
+                'node': node,
+                'ip': ip,
+                'username': SSH_USERNAME,
+            }
+
+        sys.stderr.write(f"[SSH API] Created session {session_id} for VM {vmid} at {ip}\n")
+        sys.stderr.flush()
+        return jsonify({"sessionId": session_id, "vmid": vmid_int, "ip": ip}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        sys.stderr.write(f"[SSH API] Error creating terminal session for VM {vmid}: {str(e)}\n")
+        sys.stderr.flush()
+        return jsonify({"error": f"Failed to create terminal session: {str(e)}"}), 500
+
+
 async def vnc_websocket_handler(browser_ws):
     """WebSocket proxy between the browser (noVNC) and the Proxmox VNC WebSocket.
     Runs on port 5001 via the standalone websockets server."""
@@ -1218,11 +1286,182 @@ async def vnc_websocket_handler(browser_ws):
     sys.stderr.flush()
 
 
+async def ssh_terminal_handler(browser_ws):
+    """WebSocket SSH bridge for xterm.js terminal sessions.
+    Expects ?sessionId=<uuid> query param. Runs on port 5001."""
+    path = browser_ws.request.path
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+    session_id = params.get('sessionId', [None])[0]
+
+    if not session_id:
+        await browser_ws.send('{"type":"error","message":"No sessionId provided"}')
+        await browser_ws.close(1008, 'No sessionId')
+        return
+
+    with _ssh_sessions_lock:
+        session = _ssh_sessions.get(session_id)
+
+    if not session:
+        await browser_ws.send('{"type":"error","message":"Session not found or expired"}')
+        await browser_ws.close(1008, 'Session not found')
+        return
+
+    ip = session['ip']
+    username = session['username']
+    vmid = session['vmid']
+
+    sys.stderr.write(f"[SSH WS] Opening SSH terminal: vmid={vmid} ip={ip} user={username}\n")
+    sys.stderr.flush()
+
+    loop = asyncio.get_event_loop()
+    shell_channel = None
+    pending_resize = {}
+    channel_ready = asyncio.Event()
+    closed = asyncio.Event()
+
+    # SSH connection runs in a thread pool executor
+    def _connect_ssh():
+        nonlocal shell_channel
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=ip,
+            port=SSH_PORT,
+            username=username,
+            pkey=_ssh_private_key,
+            timeout=10,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        cols = pending_resize.get('cols', 80)
+        rows = pending_resize.get('rows', 24)
+        channel = client.invoke_shell(term='xterm-256color', width=cols, height=rows)
+        # Keep blocking mode: recv() blocks until data arrives, which is correct
+        # when dispatched via run_in_executor(). Non-blocking would return b""
+        # immediately and our "if not data: break" would kill the session at once.
+        shell_channel = channel
+        return client
+
+    try:
+        ssh_client_obj = await loop.run_in_executor(None, _connect_ssh)
+    except Exception as e:
+        sys.stderr.write(f"[SSH WS] Connection failed for session {session_id}: {e}\n")
+        sys.stderr.flush()
+        await browser_ws.send(f'{{"type":"error","message":"SSH connection failed: {str(e)}"}}')
+        await browser_ws.close(1011, 'SSH connection failed')
+        with _ssh_sessions_lock:
+            _ssh_sessions.pop(session_id, None)
+        return
+
+    await browser_ws.send(f'{{"type":"connected","sessionId":"{session_id}"}}')
+    channel_ready.set()
+    sys.stderr.write(f"[SSH WS] Shell started for session {session_id}\n")
+    sys.stderr.flush()
+
+    # SSH shell → browser
+    async def shell_to_browser():
+        try:
+            while not closed.is_set():
+                try:
+                    data = await loop.run_in_executor(None, shell_channel.recv, 4096)
+                    if not data:
+                        break
+                    await browser_ws.send(bytes(data))
+                except Exception as e:
+                    if not closed.is_set():
+                        sys.stderr.write(f"[SSH WS] Shell->browser error {session_id}: {e}\n")
+                        sys.stderr.flush()
+                    break
+        finally:
+            closed.set()
+            if browser_ws.open:
+                await browser_ws.send('{"type":"disconnected"}')
+                await browser_ws.close(1000, 'SSH shell closed')
+
+    # Browser → SSH shell
+    async def browser_to_shell():
+        try:
+            async for message in browser_ws:
+                if closed.is_set():
+                    break
+                if isinstance(message, str):
+                    try:
+                        msg = __import__('json').loads(message)
+                        msg_type = msg.get('type')
+                        if msg_type == 'ping':
+                            await browser_ws.send('{"type":"pong"}')
+                        elif msg_type == 'resize':
+                            cols = msg.get('cols', 80)
+                            rows = msg.get('rows', 24)
+                            pending_resize['cols'] = cols
+                            pending_resize['rows'] = rows
+                            if shell_channel:
+                                await loop.run_in_executor(
+                                    None, shell_channel.resize_pty, cols, rows
+                                )
+                        elif msg_type == 'inject':
+                            data = msg.get('data', '')
+                            if data and shell_channel:
+                                await loop.run_in_executor(
+                                    None, shell_channel.sendall, data.encode('utf-8')
+                                )
+                        else:
+                            if shell_channel:
+                                await loop.run_in_executor(
+                                    None, shell_channel.sendall, message.encode('utf-8')
+                                )
+                    except __import__('json').JSONDecodeError:
+                        if shell_channel:
+                            await loop.run_in_executor(
+                                None, shell_channel.sendall, message.encode('utf-8')
+                            )
+                else:
+                    if shell_channel:
+                        await loop.run_in_executor(None, shell_channel.sendall, bytes(message))
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        except Exception as e:
+            sys.stderr.write(f"[SSH WS] Browser->shell error {session_id}: {e}\n")
+            sys.stderr.flush()
+        finally:
+            closed.set()
+            # Close the channel so the blocking recv() in shell_to_browser unblocks
+            try:
+                shell_channel.close()
+            except Exception:
+                pass
+
+    try:
+        await asyncio.gather(shell_to_browser(), browser_to_shell())
+    finally:
+        try:
+            shell_channel.close()
+        except Exception:
+            pass
+        try:
+            ssh_client_obj.close()
+        except Exception:
+            pass
+        with _ssh_sessions_lock:
+            _ssh_sessions.pop(session_id, None)
+        sys.stderr.write(f"[SSH WS] Session {session_id} ended\n")
+        sys.stderr.flush()
+
+
+async def _ws_router(websocket):
+    """Route incoming WebSocket connections by path to VNC or SSH handler."""
+    path = urllib.parse.urlparse(websocket.request.path).path
+    if path == '/ws/terminal':
+        await ssh_terminal_handler(websocket)
+    else:
+        await vnc_websocket_handler(websocket)
+
+
 def start_vnc_ws_server():
-    """Start the standalone WebSocket server for VNC proxying on port 5001"""
+    """Start the standalone WebSocket server on port 5001 (handles both VNC and SSH terminal)."""
     async def _serve():
         async with websockets.serve(
-            vnc_websocket_handler,
+            _ws_router,
             '0.0.0.0',
             5001,
             origins=None,
@@ -1231,7 +1470,7 @@ def start_vnc_ws_server():
             ping_timeout=60,
             max_size=2**23,
         ) as server:
-            sys.stderr.write("[VNC WS] WebSocket server listening on port 5001\n")
+            sys.stderr.write("[WS] WebSocket server listening on port 5001 (VNC + SSH terminal)\n")
             sys.stderr.flush()
             await asyncio.get_event_loop().create_future()  # run forever
 
