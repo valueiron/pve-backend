@@ -684,6 +684,11 @@ def docker_container_metrics(container_id):
     return _docker_proxy(f'containers/{container_id}/metrics')
 
 
+@app.route('/api/docker/containers/<container_id>/exec', methods=['POST'])
+def docker_container_exec_session(container_id):
+    return _docker_proxy(f'containers/{container_id}/exec', method='POST')
+
+
 @app.route('/api/docker/containers/<container_id>', methods=['GET'])
 def docker_inspect_container(container_id):
     return _docker_proxy(f'containers/{container_id}')
