@@ -101,6 +101,24 @@ def get_vm_details(vmid):
         return jsonify({"error": f"Failed to fetch VM details: {str(e)}"}), 500
 
 
+@vm_bp.get('/api/vms/<vmid>/metrics')
+def get_vm_metrics(vmid):
+    """Get live runtime metrics for a Proxmox VM (CPU, memory, net I/O, disk I/O)."""
+    try:
+        try:
+            vmid_int = int(vmid)
+        except ValueError:
+            return jsonify({"error": f"Metrics are only available for Proxmox VMs (numeric ID), got: {vmid}"}), 400
+        proxmox = get_proxmox_client()
+        metrics = proxmox.get_vm_metrics(vmid_int)
+        return jsonify(metrics), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logger.error("[VM Metrics] Error fetching metrics for VM %s: %s", vmid, e)
+        return jsonify({"error": f"Failed to fetch VM metrics: {str(e)}"}), 500
+
+
 @vm_bp.post('/api/vms/<vmid>/start')
 def start_vm(vmid):
     """Start a virtual machine."""

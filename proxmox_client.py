@@ -253,8 +253,11 @@ class ProxmoxClient:
             try:
                 resources = self._make_request('GET', '/cluster/resources', {'type': 'vm'})
                 
-                # Build a map of VMID to tags from cluster resources
+                # Build a map of VMID to tags + disk usage from cluster resources.
+                # /cluster/resources gives correct disk=used_space, maxdisk=total_size.
+                # The per-node /qemu list returns disk=write_IO_bytes (wrong for storage display).
                 tags_map = {}
+                disk_map = {}  # vmid -> {disk, maxdisk}
                 for resource in resources:
                     if resource.get('type') == 'qemu':
                         vmid = resource.get('vmid')
@@ -274,6 +277,10 @@ class ProxmoxClient:
                                         if tag:
                                             tags.append(tag)
                             tags_map[vmid] = tags
+                            disk_map[vmid] = {
+                                'disk': resource.get('disk', 0),
+                                'maxdisk': resource.get('maxdisk', 0),
+                            }
                 
                 # Now get detailed VM info from each node
                 nodes = self._make_request('GET', '/nodes')
@@ -306,6 +313,7 @@ class ProxmoxClient:
                                     print(f"Warning: Could not fetch IP addresses for VM {vmid}: {str(e)}")
                                     ip_addresses = []
                             
+                            disk_info = disk_map.get(vmid, {})
                             vm_info = {
                                 'vmid': vmid,
                                 'name': vm.get('name', ''),
@@ -314,21 +322,21 @@ class ProxmoxClient:
                                 'cpu': vm.get('cpu', 0),
                                 'mem': vm.get('mem', 0),
                                 'maxmem': vm.get('maxmem', 0),
-                                'disk': vm.get('disk', 0),
-                                'maxdisk': vm.get('maxdisk', 0),
+                                'disk': disk_info.get('disk', vm.get('disk', 0)),
+                                'maxdisk': disk_info.get('maxdisk', vm.get('maxdisk', 0)),
                                 'uptime': vm.get('uptime', 0),
                                 'tags': tags,
                                 'ip_addresses': ip_addresses
                             }
                             all_vms.append(vm_info)
-                    
+
                     except Exception as e:
                         # Log error but continue with other nodes
                         print(f"Error fetching VMs from node {node_name}: {str(e)}")
                         continue
-                
+
                 return all_vms
-            
+
             except Exception as cluster_error:
                 # Fallback to the original method if cluster/resources doesn't work
                 print(f"Warning: Could not use /cluster/resources endpoint: {str(cluster_error)}")
@@ -409,6 +417,35 @@ class ProxmoxClient:
         except Exception as e:
             raise Exception(f"Error fetching VMs from Proxmox: {str(e)}")
     
+    def get_vm_metrics(self, vmid):
+        """
+        Get live runtime metrics for a specific VM — fast path (status/current only).
+        Designed for repeated polling; does not call /config.
+        """
+        nodes = self._make_request('GET', '/nodes')
+        for node in nodes:
+            node_name = node['node']
+            try:
+                s = self._make_request('GET', f'/nodes/{node_name}/qemu/{vmid}/status/current')
+                mem = s.get('mem', 0)
+                maxmem = s.get('maxmem', 0)
+                return {
+                    'vmid': vmid,
+                    'status': s.get('status', 'unknown'),
+                    'cpu_percent': round(s.get('cpu', 0) * 100, 2),
+                    'mem_bytes': mem,
+                    'maxmem_bytes': maxmem,
+                    'mem_percent': round(mem / maxmem * 100, 2) if maxmem > 0 else 0,
+                    'netin_bytes': s.get('netin', 0),
+                    'netout_bytes': s.get('netout', 0),
+                    'diskread_bytes': s.get('diskread', 0),
+                    'diskwrite_bytes': s.get('diskwrite', 0),
+                    'uptime': s.get('uptime', 0),
+                }
+            except Exception:
+                continue
+        raise ValueError(f"VM with ID {vmid} not found")
+
     def get_vm_details(self, vmid):
         """
         Get detailed information about a specific VM.
