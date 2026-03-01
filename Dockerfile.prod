@@ -1,0 +1,17 @@
+# Production Dockerfile — Gunicorn WSGI server
+FROM python:3.12-alpine
+
+WORKDIR /app
+
+# gcc + libffi are needed to compile cryptography (pulled in by asyncssh/azure SDKs)
+RUN apk add --no-cache git gcc musl-dev libffi-dev
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt gunicorn
+
+COPY . .
+
+# 5000 = Flask/Gunicorn HTTP  |  5001 = standalone WebSocket server (VNC + SSH terminal)
+EXPOSE 5000 5001
+
+CMD ["gunicorn", "--config", "gunicorn.conf.py", "app:app"]
