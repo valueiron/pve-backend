@@ -780,6 +780,10 @@ def k8s_pod_metrics(namespace, name):
 def k8s_restart_pod(namespace, name):
     return _k8s_proxy(f'pods/{namespace}/{name}/restart', method='POST')
 
+@app.route('/api/k8s/pods/<namespace>/<name>/exec', methods=['POST'])
+def k8s_exec_pod(namespace, name):
+    return _k8s_proxy(f'pods/{namespace}/{name}/exec', method='POST')
+
 
 # Deployments
 @app.route('/api/k8s/deployments')
