@@ -1614,7 +1614,8 @@
     },
     "/api/labs/{lab_id}/launch": {
       "post": {
-        "summary": "Trigger a GitHub Actions workflow for this lab",
+        "summary": "Launch a lab",
+        "description": "For `dockerk8s` labs: provisions Docker container(s) and K8s resource(s) using manifest files from the lab directory (docker-compose.yml / k8s-manifest.yaml if specified in lab.yml), or falls back to a default ubuntu:24.04 shell. For GitHub-backed labs: triggers the configured GitHub Actions workflow.",
         "operationId": "launchLab",
         "tags": ["Labs"],
         "parameters": [ { "$ref": "#/components/parameters/LabId" } ],
@@ -1637,7 +1638,7 @@
         },
         "responses": {
           "200": {
-            "description": "Workflow triggered",
+            "description": "Workflow triggered or lab provisioned",
             "content": {
               "application/json": {
                 "schema": {
@@ -1649,6 +1650,31 @@
           },
           "404": { "$ref": "#/components/responses/Error" },
           "422": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/labs/{lab_id}/stop": {
+      "post": {
+        "summary": "Stop a lab",
+        "description": "Deprovisions all Docker containers and Kubernetes resources associated with a `dockerk8s` lab. Removes tracked state. Only supported for dockerk8s labs.",
+        "operationId": "stopLab",
+        "tags": ["Labs"],
+        "parameters": [ { "$ref": "#/components/parameters/LabId" } ],
+        "responses": {
+          "200": {
+            "description": "Lab stopped and resources removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "stopped": { "type": "boolean" } }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
         }
       }
