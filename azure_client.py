@@ -2,15 +2,42 @@
 Azure API Client Module
 Handles connection to Azure Compute API using Azure SDK.
 """
+import logging
 import os
-from azure.identity import ClientSecretCredential
-from azure.mgmt.compute import ComputeManagementClient
-from azure.mgmt.resource import ResourceManagementClient
-from azure.mgmt.network import NetworkManagementClient
-from azure.mgmt.storage import StorageManagementClient
-from azure.core.exceptions import AzureError
-from dotenv import load_dotenv
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+# Azure SDK packages are heavy — only load them when a client is actually
+# instantiated, not at module import time.
+def _ensure_sdk() -> None:
+    """Inject Azure SDK classes into module globals on first call. No-op thereafter."""
+    if 'ClientSecretCredential' in globals():
+        return
+    try:
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.mgmt.resource import ResourceManagementClient
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.mgmt.storage import StorageManagementClient
+        from azure.core.exceptions import AzureError
+    except ImportError as exc:
+        raise ImportError(
+            "Azure SDK packages are not installed. Run: "
+            "pip install azure-identity azure-mgmt-compute azure-mgmt-resource "
+            "azure-mgmt-network azure-mgmt-storage azure-storage-blob"
+        ) from exc
+    globals().update({
+        'ClientSecretCredential':   ClientSecretCredential,
+        'ComputeManagementClient':  ComputeManagementClient,
+        'ResourceManagementClient': ResourceManagementClient,
+        'NetworkManagementClient':  NetworkManagementClient,
+        'StorageManagementClient':  StorageManagementClient,
+        'AzureError':               AzureError,
+    })
 
 # Load environment variables
 load_dotenv()
@@ -20,26 +47,17 @@ class AzureClient:
     
     def __init__(self):
         """Initialize Azure API connection using environment variables"""
-        import sys
-        sys.stderr.write("[Azure Client] Initializing AzureClient...\n")
-        sys.stderr.flush()
-        
-        self.client_id = os.getenv('AZURE_CLIENT_ID', '').strip()
-        self.client_secret = os.getenv('AZURE_CLIENT_SECRET', '').strip()
-        self.tenant_id = os.getenv('AZURE_TENANT_ID', '').strip()
+        _ensure_sdk()
+        self.client_id       = os.getenv('AZURE_CLIENT_ID', '').strip()
+        self.client_secret   = os.getenv('AZURE_CLIENT_SECRET', '').strip()
+        self.tenant_id       = os.getenv('AZURE_TENANT_ID', '').strip()
         self.subscription_id = os.getenv('AZURE_SUBSCRIPTION_ID', '').strip()
-        
-        sys.stderr.write(f"[Azure Client] Environment check - CLIENT_ID: {'SET' if self.client_id else 'NOT SET'}, TENANT_ID: {'SET' if self.tenant_id else 'NOT SET'}, SECRET: {'SET' if self.client_secret else 'NOT SET'}\n")
-        sys.stderr.flush()
-        
+
         if not all([self.client_id, self.client_secret, self.tenant_id]):
-            error_msg = (
-                "Missing required Azure environment variables. "
-                "Please set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AZURE_TENANT_ID"
+            raise ValueError(
+                "Missing required Azure environment variables: "
+                "AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID"
             )
-            sys.stderr.write(f"[Azure Client] ERROR: {error_msg}\n")
-            sys.stderr.flush()
-            raise ValueError(error_msg)
         
         # Create credential for authentication
         self.credential = ClientSecretCredential(
@@ -230,176 +248,112 @@ class AzureClient:
         
         return metrics
     
+    def _process_vm(self, vm, resource_group_name, compute_client, subscription_id):
+        """Fetch instance view + metrics for a single VM. Runs in a thread pool."""
+        instance_view = compute_client.virtual_machines.instance_view(
+            resource_group_name, vm.name
+        )
+        power_state = None
+        for status in instance_view.statuses:
+            if status.code and status.code.startswith('PowerState/'):
+                power_state = status.code
+                break
+
+        metrics = self._get_vm_metrics_with_client(vm, compute_client, resource_group_name)
+        tags    = self._extract_tags(vm)
+        vm_id   = self._generate_vm_id(resource_group_name, vm.name)
+
+        vm_info = {
+            'vmid':            vm_id,
+            'name':            vm.name,
+            'status':          self._normalize_status(power_state),
+            'node':            resource_group_name,
+            'type':            'azure',
+            'cpu':             metrics['cpu'],
+            'mem':             metrics['mem'],
+            'maxmem':          metrics['maxmem'],
+            'disk':            metrics['disk'],
+            'maxdisk':         metrics['maxdisk'],
+            'uptime':          metrics['uptime'],
+            'subscription_id': subscription_id,
+            'resource_group':  resource_group_name,
+            'location':        getattr(vm, 'location', None),
+            'tags':            tags,
+        }
+        if vm.hardware_profile:
+            vm_info['vm_size'] = vm.hardware_profile.vm_size
+        return vm_info
+
     def get_all_vms(self):
         """
         Fetch all VMs from all subscriptions and resource groups.
-        
+
         Returns:
             list: List of dictionaries containing VM information
         """
-        import sys
-        sys.stderr.write("[Azure get_all_vms] Starting VM fetch...\n")
-        sys.stderr.flush()
-        
+        logger.info("[Azure] Starting VM fetch")
         all_vms = []
-        
+
         try:
-            subscriptions = []
-            
-            # If subscription_id is set, use only that subscription
             if self.subscription_id:
                 subscriptions = [self.subscription_id]
-                sys.stderr.write(f"[Azure get_all_vms] Using configured subscription: {self.subscription_id}\n")
-                sys.stderr.flush()
             else:
-                # Otherwise, list all subscriptions
                 try:
-                    sys.stderr.write("[Azure get_all_vms] Listing all subscriptions...\n")
-                    sys.stderr.flush()
-                    subscription_list = self.resource_client.subscriptions.list()
-                    subscriptions = [sub.subscription_id for sub in subscription_list]
-                    sys.stderr.write(f"[Azure get_all_vms] Found {len(subscriptions)} subscription(s)\n")
-                    for i, sub_id in enumerate(subscriptions[:5]):  # Show first 5
-                        sys.stderr.write(f"[Azure get_all_vms]   Subscription {i+1}: {sub_id}\n")
-                    if len(subscriptions) > 5:
-                        sys.stderr.write(f"[Azure get_all_vms]   ... and {len(subscriptions) - 5} more\n")
-                    sys.stderr.flush()
+                    subscriptions = [
+                        sub.subscription_id
+                        for sub in self.resource_client.subscriptions.list()
+                    ]
+                    logger.info("[Azure] Found %d subscription(s)", len(subscriptions))
                 except Exception as e:
-                    import traceback
-                    sys.stderr.write(f"[Azure get_all_vms] Error: Could not list subscriptions: {str(e)}\n")
-                    sys.stderr.write(f"[Azure get_all_vms] Traceback: {traceback.format_exc()}\n")
-                    sys.stderr.flush()
+                    logger.error("[Azure] Could not list subscriptions: %s", e)
                     return all_vms
-            
+
             if not subscriptions:
-                sys.stderr.write("[Azure get_all_vms] WARNING: No subscriptions found!\n")
-                sys.stderr.flush()
+                logger.warning("[Azure] No subscriptions found")
                 return all_vms
-            
-            # Iterate through subscriptions
+
+            # Phase 1: list VMs (fast — just metadata, no extra API calls)
+            work_items = []
             for subscription_id in subscriptions:
                 try:
-                    import sys
-                    sys.stderr.write(f"[Azure get_all_vms] Processing subscription: {subscription_id}\n")
-                    sys.stderr.flush()
-                    # Create compute client for this subscription
-                    compute_client = ComputeManagementClient(
-                        self.credential,
-                        subscription_id
-                    )
-                    
-                    # List all VMs in this subscription
-                    sys.stderr.write(f"[Azure get_all_vms] Listing VMs in subscription {subscription_id}...\n")
-                    sys.stderr.flush()
-                    vm_list = compute_client.virtual_machines.list_all()
-                    vm_count = 0
-                    processed_count = 0
-                    
-                    for vm in vm_list:
-                        vm_count += 1
-                        
-                        # Extract resource group name from VM ID
-                        # ID format: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{name}
+                    compute_client = ComputeManagementClient(self.credential, subscription_id)
+                    for vm in compute_client.virtual_machines.list_all():
                         resource_group_name = None
                         if vm.id:
                             parts = vm.id.split('/')
                             try:
-                                rg_index = parts.index('resourceGroups')
-                                if rg_index + 1 < len(parts):
-                                    resource_group_name = parts[rg_index + 1]
-                            except ValueError:
+                                idx = parts.index('resourceGroups')
+                                resource_group_name = parts[idx + 1]
+                            except (ValueError, IndexError):
                                 pass
-                        
-                        if not resource_group_name:
-                            sys.stderr.write(f"[Azure get_all_vms] WARNING: Could not extract resource group from VM {vm.name} (ID: {vm.id})\n")
-                            sys.stderr.flush()
-                            continue
-                        
-                        sys.stderr.write(f"[Azure get_all_vms] Found VM {vm_count}: {vm.name} (RG: {resource_group_name})\n")
-                        sys.stderr.flush()
-                        try:
-                            # Get instance view to check power state
-                            instance_view = compute_client.virtual_machines.instance_view(
-                                resource_group_name,
-                                vm.name
-                            )
-                            
-                            # Extract power state from instance view
-                            power_state = None
-                            for status in instance_view.statuses:
-                                if status.code and status.code.startswith('PowerState/'):
-                                    power_state = status.code
-                                    break
-                            
-                            # Get metrics
-                            metrics = self._get_vm_metrics_with_client(vm, compute_client, resource_group_name)
-                            
-                            # Extract tags
-                            tags = self._extract_tags(vm)
-                            
-                            # Normalize VM data to match Proxmox structure
-                            vm_id = self._generate_vm_id(resource_group_name, vm.name)
-                            
-                            vm_info = {
-                                'vmid': vm_id,
-                                'name': vm.name,
-                                'status': self._normalize_status(power_state),
-                                'node': resource_group_name,  # Use resource group as "node"
-                                'type': 'azure',
-                                'cpu': metrics['cpu'],
-                                'mem': metrics['mem'],
-                                'maxmem': metrics['maxmem'],
-                                'disk': metrics['disk'],
-                                'maxdisk': metrics['maxdisk'],
-                                'uptime': metrics['uptime'],
-                                'subscription_id': subscription_id,
-                                'resource_group': resource_group_name,
-                                'location': vm.location if hasattr(vm, 'location') else None,
-                                'tags': tags
-                            }
-                            
-                            # Add hardware profile info if available
-                            if vm.hardware_profile:
-                                vm_info['vm_size'] = vm.hardware_profile.vm_size
-                            
-                            all_vms.append(vm_info)
-                            processed_count += 1
-                            sys.stderr.write(f"[Azure get_all_vms] Successfully processed VM: {vm.name}\n")
-                            sys.stderr.flush()
-                            
-                        except Exception as e:
-                            # Log error but continue with other VMs
-                            import traceback
-                            import sys
-                            rg_name = resource_group_name if 'resource_group_name' in locals() else 'unknown'
-                            sys.stderr.write(f"[Azure get_all_vms] Error processing VM {vm.name} in {rg_name}: {str(e)}\n")
-                            sys.stderr.write(f"[Azure get_all_vms] Traceback: {traceback.format_exc()}\n")
-                            sys.stderr.flush()
-                            continue
-                    
-                    sys.stderr.write(f"[Azure get_all_vms] Processed {vm_count} VM(s) from subscription {subscription_id}, successfully added {processed_count} to list\n")
-                    sys.stderr.flush()
-                
+                        if resource_group_name:
+                            work_items.append((vm, resource_group_name, compute_client, subscription_id))
+                        else:
+                            logger.warning("[Azure] Could not extract resource group from VM %s", vm.name)
                 except Exception as e:
-                    # Log error but continue with other subscriptions
-                    import traceback
-                    import sys
-                    sys.stderr.write(f"[Azure get_all_vms] Error fetching VMs from subscription {subscription_id}: {str(e)}\n")
-                    sys.stderr.write(f"[Azure get_all_vms] Traceback: {traceback.format_exc()}\n")
-                    sys.stderr.flush()
-                    continue
-            
-            import sys
-            sys.stderr.write(f"[Azure get_all_vms] Total Azure VMs found: {len(all_vms)}\n")
-            sys.stderr.flush()
+                    logger.error("[Azure] Error listing VMs in subscription %s: %s", subscription_id, e)
+
+            logger.info("[Azure] Fetching details for %d VM(s) in parallel", len(work_items))
+
+            # Phase 2: parallelize instance_view + metrics (the slow part)
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {
+                    executor.submit(self._process_vm, vm, rg, cc, sub): vm.name
+                    for vm, rg, cc, sub in work_items
+                }
+                for future in as_completed(futures):
+                    vm_name = futures[future]
+                    try:
+                        all_vms.append(future.result())
+                    except Exception as e:
+                        logger.error("[Azure] Error processing VM %s: %s", vm_name, e)
+
+            logger.info("[Azure] Total Azure VMs found: %d", len(all_vms))
             return all_vms
-        
+
         except Exception as e:
             import traceback
-            error_msg = f"Error fetching VMs from Azure: {str(e)}"
-            print(error_msg)
-            print(f"Traceback: {traceback.format_exc()}")
-            raise Exception(error_msg)
+            raise Exception(f"Error fetching VMs from Azure: {e}") from e
     
     def _find_vm_subscription(self, resource_group, vm_name):
         """
@@ -607,304 +561,229 @@ class AzureClient:
     def get_all_networking(self):
         """
         Fetch all networking resources (VNets, Subnets, NSGs, Public IPs).
-        
+
         Returns:
             dict: Dictionary containing lists of networking resources
         """
-        import sys
-        sys.stderr.write("[Azure get_all_networking] Starting networking fetch...\n")
-        sys.stderr.flush()
-        
-        result = {
-            'vnets': [],
-            'subnets': [],
-            'nsgs': [],
-            'public_ips': []
-        }
-        
+        logger.info("[Azure] Starting networking fetch")
+        result = {'vnets': [], 'subnets': [], 'nsgs': [], 'public_ips': []}
+
         try:
-            subscriptions = []
-            
             if self.subscription_id:
                 subscriptions = [self.subscription_id]
             else:
                 try:
-                    subscription_list = self.resource_client.subscriptions.list()
-                    subscriptions = [sub.subscription_id for sub in subscription_list]
+                    subscriptions = [
+                        sub.subscription_id
+                        for sub in self.resource_client.subscriptions.list()
+                    ]
                 except Exception as e:
-                    sys.stderr.write(f"[Azure get_all_networking] Error listing subscriptions: {str(e)}\n")
-                    sys.stderr.flush()
+                    logger.error("[Azure] Error listing subscriptions: %s", e)
                     return result
-            
+
             for subscription_id in subscriptions:
                 try:
-                    network_client = NetworkManagementClient(self.credential, subscription_id)
+                    network_client  = NetworkManagementClient(self.credential, subscription_id)
                     resource_client = ResourceManagementClient(self.credential, subscription_id)
-                    
-                    # Get all resource groups
-                    resource_groups = resource_client.resource_groups.list()
-                    
-                    for rg in resource_groups:
+
+                    for rg in resource_client.resource_groups.list():
                         rg_name = rg.name
-                        
                         try:
-                            # Get Virtual Networks
-                            vnets = network_client.virtual_networks.list(rg_name)
-                            for vnet in vnets:
+                            # Materialise once — used for both vnets and subnets
+                            vnet_list = list(network_client.virtual_networks.list(rg_name))
+
+                            for vnet in vnet_list:
                                 address_space = []
                                 if vnet.address_space and vnet.address_space.address_prefixes:
                                     address_space = list(vnet.address_space.address_prefixes)
-                                
-                                vnet_info = {
-                                    'id': vnet.id,
-                                    'name': vnet.name,
-                                    'resource_group': rg_name,
-                                    'location': vnet.location,
-                                    'address_space': address_space,
+                                result['vnets'].append({
+                                    'id':              vnet.id,
+                                    'name':            vnet.name,
+                                    'resource_group':  rg_name,
+                                    'location':        vnet.location,
+                                    'address_space':   address_space,
                                     'subscription_id': subscription_id,
-                                    'type': 'azure',
-                                    'resource_type': 'vnet',
-                                    'tags': self._extract_tags(vnet)
-                                }
-                                result['vnets'].append(vnet_info)
-                            
-                            # Get Subnets
-                            for vnet in network_client.virtual_networks.list(rg_name):
-                                subnets = network_client.subnets.list(rg_name, vnet.name)
-                                for subnet in subnets:
-                                    subnet_info = {
-                                        'id': subnet.id,
-                                        'name': subnet.name,
-                                        'vnet_name': vnet.name,
-                                        'resource_group': rg_name,
-                                        'address_prefix': subnet.address_prefix,
+                                    'type':            'azure',
+                                    'resource_type':   'vnet',
+                                    'tags':            self._extract_tags(vnet),
+                                })
+
+                            # Reuse vnet_list — no second API call
+                            for vnet in vnet_list:
+                                for subnet in network_client.subnets.list(rg_name, vnet.name):
+                                    result['subnets'].append({
+                                        'id':              subnet.id,
+                                        'name':            subnet.name,
+                                        'vnet_name':       vnet.name,
+                                        'resource_group':  rg_name,
+                                        'address_prefix':  subnet.address_prefix,
                                         'subscription_id': subscription_id,
-                                        'type': 'azure',
-                                        'resource_type': 'subnet',
-                                        'tags': self._extract_tags(subnet)
-                                    }
-                                    result['subnets'].append(subnet_info)
-                            
-                            # Get Network Security Groups
-                            nsgs = network_client.network_security_groups.list(rg_name)
-                            for nsg in nsgs:
-                                nsg_info = {
-                                    'id': nsg.id,
-                                    'name': nsg.name,
-                                    'resource_group': rg_name,
-                                    'location': nsg.location,
+                                        'type':            'azure',
+                                        'resource_type':   'subnet',
+                                        'tags':            self._extract_tags(subnet),
+                                    })
+
+                            for nsg in network_client.network_security_groups.list(rg_name):
+                                result['nsgs'].append({
+                                    'id':              nsg.id,
+                                    'name':            nsg.name,
+                                    'resource_group':  rg_name,
+                                    'location':        nsg.location,
                                     'subscription_id': subscription_id,
-                                    'type': 'azure',
-                                    'resource_type': 'nsg',
-                                    'tags': self._extract_tags(nsg)
-                                }
-                                result['nsgs'].append(nsg_info)
-                            
-                            # Get Public IP Addresses
-                            public_ips = network_client.public_ip_addresses.list(rg_name)
-                            for pip in public_ips:
-                                pip_info = {
-                                    'id': pip.id,
-                                    'name': pip.name,
-                                    'resource_group': rg_name,
-                                    'location': pip.location,
-                                    'ip_address': pip.ip_address if hasattr(pip, 'ip_address') else None,
-                                    'allocation_method': pip.public_ip_allocation_method.value if hasattr(pip, 'public_ip_allocation_method') and pip.public_ip_allocation_method else None,
-                                    'subscription_id': subscription_id,
-                                    'type': 'azure',
-                                    'resource_type': 'public_ip',
-                                    'tags': self._extract_tags(pip)
-                                }
-                                result['public_ips'].append(pip_info)
-                        
+                                    'type':            'azure',
+                                    'resource_type':   'nsg',
+                                    'tags':            self._extract_tags(nsg),
+                                })
+
+                            for pip in network_client.public_ip_addresses.list(rg_name):
+                                alloc = None
+                                if hasattr(pip, 'public_ip_allocation_method') and pip.public_ip_allocation_method:
+                                    alloc = pip.public_ip_allocation_method.value
+                                result['public_ips'].append({
+                                    'id':                pip.id,
+                                    'name':              pip.name,
+                                    'resource_group':    rg_name,
+                                    'location':          pip.location,
+                                    'ip_address':        getattr(pip, 'ip_address', None),
+                                    'allocation_method': alloc,
+                                    'subscription_id':   subscription_id,
+                                    'type':              'azure',
+                                    'resource_type':     'public_ip',
+                                    'tags':              self._extract_tags(pip),
+                                })
+
                         except Exception as e:
-                            sys.stderr.write(f"[Azure get_all_networking] Error processing RG {rg_name}: {str(e)}\n")
-                            sys.stderr.flush()
+                            logger.error("[Azure] Error processing RG %s: %s", rg_name, e)
                             continue
-                
+
                 except Exception as e:
-                    sys.stderr.write(f"[Azure get_all_networking] Error processing subscription {subscription_id}: {str(e)}\n")
-                    sys.stderr.flush()
+                    logger.error("[Azure] Error processing subscription %s: %s", subscription_id, e)
                     continue
-            
-            sys.stderr.write(f"[Azure get_all_networking] Found {len(result['vnets'])} VNets, {len(result['subnets'])} Subnets, {len(result['nsgs'])} NSGs, {len(result['public_ips'])} Public IPs\n")
-            sys.stderr.flush()
+
+            logger.info(
+                "[Azure] Networking: %d VNets, %d Subnets, %d NSGs, %d Public IPs",
+                len(result['vnets']), len(result['subnets']),
+                len(result['nsgs']), len(result['public_ips']),
+            )
             return result
-        
+
         except Exception as e:
-            import traceback
-            error_msg = f"Error fetching networking resources from Azure: {str(e)}"
-            sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
-            sys.stderr.flush()
-            raise Exception(error_msg)
+            raise Exception(f"Error fetching networking resources from Azure: {e}") from e
     
     def get_all_storage(self):
         """
         Fetch all Blob Storage accounts and containers.
-        
+
         Returns:
             dict: Dictionary containing lists of storage accounts and containers
         """
-        import sys
-        sys.stderr.write("[Azure get_all_storage] Starting storage fetch...\n")
-        sys.stderr.flush()
-        
-        result = {
-            'storage_accounts': [],
-            'containers': []
-        }
-        
+        logger.info("[Azure] Starting storage fetch")
+        result = {'storage_accounts': [], 'containers': []}
+
         try:
-            subscriptions = []
-            
             if self.subscription_id:
                 subscriptions = [self.subscription_id]
             else:
                 try:
-                    subscription_list = self.resource_client.subscriptions.list()
-                    subscriptions = [sub.subscription_id for sub in subscription_list]
+                    subscriptions = [
+                        sub.subscription_id
+                        for sub in self.resource_client.subscriptions.list()
+                    ]
                 except Exception as e:
-                    sys.stderr.write(f"[Azure get_all_storage] Error listing subscriptions: {str(e)}\n")
-                    sys.stderr.flush()
+                    logger.error("[Azure] Error listing subscriptions: %s", e)
                     return result
-            
+
             for subscription_id in subscriptions:
                 try:
-                    storage_client = StorageManagementClient(self.credential, subscription_id)
+                    storage_client  = StorageManagementClient(self.credential, subscription_id)
                     resource_client = ResourceManagementClient(self.credential, subscription_id)
-                    
-                    # Get all resource groups
-                    resource_groups = resource_client.resource_groups.list()
-                    
-                    for rg in resource_groups:
+
+                    for rg in resource_client.resource_groups.list():
                         rg_name = rg.name
-                        
                         try:
-                            # Get Storage Accounts
-                            storage_accounts = storage_client.storage_accounts.list_by_resource_group(rg_name)
-                            
-                            for account in storage_accounts:
-                                # Only process accounts with BlobStorage or StorageV2 kind
+                            for account in storage_client.storage_accounts.list_by_resource_group(rg_name):
                                 if account.kind not in ['BlobStorage', 'StorageV2', 'Storage']:
                                     continue
-                                
+
                                 account_info = {
-                                    'id': account.id,
-                                    'name': account.name,
-                                    'resource_group': rg_name,
-                                    'location': account.location,
-                                    'kind': account.kind,
-                                    'sku': account.sku.name if account.sku else None,
+                                    'id':              account.id,
+                                    'name':            account.name,
+                                    'resource_group':  rg_name,
+                                    'location':        account.location,
+                                    'kind':            account.kind,
+                                    'sku':             account.sku.name if account.sku else None,
                                     'subscription_id': subscription_id,
-                                    'type': 'azure',
-                                    'resource_type': 'storage_account',
-                                    'tags': self._extract_tags(account)
+                                    'type':            'azure',
+                                    'resource_type':   'storage_account',
+                                    'tags':            self._extract_tags(account),
                                 }
-                                
-                                # Get primary endpoints
                                 if account.primary_endpoints:
                                     account_info['primary_blob_endpoint'] = account.primary_endpoints.blob
                                     account_info['primary_file_endpoint'] = account.primary_endpoints.file
-                                
                                 result['storage_accounts'].append(account_info)
-                                
-                                # Get containers for this storage account
+
                                 try:
-                                    # Get storage account keys
+                                    from azure.storage.blob import BlobServiceClient
                                     keys = storage_client.storage_accounts.list_keys(rg_name, account.name)
                                     if keys.keys:
-                                        # Use the first key to access blob service
-                                        from azure.storage.blob import BlobServiceClient
-                                        
-                                        account_key = keys.keys[0].value
-                                        connection_string = f"DefaultEndpointsProtocol=https;AccountName={account.name};AccountKey={account_key};EndpointSuffix=core.windows.net"
-                                        
-                                        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-                                        
-                                        # List containers
-                                        containers = blob_service_client.list_containers()
-                                        for container in containers:
-                                            container_info = {
-                                                'id': f"{account.name}/{container.name}",
-                                                'name': container.name,
+                                        conn = (
+                                            f"DefaultEndpointsProtocol=https;"
+                                            f"AccountName={account.name};"
+                                            f"AccountKey={keys.keys[0].value};"
+                                            f"EndpointSuffix=core.windows.net"
+                                        )
+                                        blob_svc = BlobServiceClient.from_connection_string(conn)
+                                        for container in blob_svc.list_containers():
+                                            c_info = {
+                                                'id':              f"{account.name}/{container.name}",
+                                                'name':            container.name,
                                                 'storage_account': account.name,
-                                                'resource_group': rg_name,
-                                                'public_access': container.public_access or 'None',
+                                                'resource_group':  rg_name,
+                                                'public_access':   container.public_access or 'None',
                                                 'subscription_id': subscription_id,
-                                                'type': 'azure',
-                                                'resource_type': 'blob_container',
-                                                'tags': []  # Containers don't have tags in Azure
+                                                'type':            'azure',
+                                                'resource_type':   'blob_container',
+                                                'tags':            [],
                                             }
-                                            
-                                            # Get container properties for metadata
                                             try:
-                                                container_client = blob_service_client.get_container_client(container.name)
-                                                properties = container_client.get_container_properties()
-                                                container_info['last_modified'] = properties.last_modified.isoformat() if properties.last_modified else None
-                                            except:
+                                                props = blob_svc.get_container_client(container.name).get_container_properties()
+                                                c_info['last_modified'] = props.last_modified.isoformat() if props.last_modified else None
+                                            except Exception:
                                                 pass
-                                            
-                                            result['containers'].append(container_info)
-                                
+                                            result['containers'].append(c_info)
                                 except Exception as e:
-                                    sys.stderr.write(f"[Azure get_all_storage] Error fetching containers for {account.name}: {str(e)}\n")
-                                    sys.stderr.flush()
-                                    continue
-                        
+                                    logger.error("[Azure] Error fetching containers for %s: %s", account.name, e)
                         except Exception as e:
-                            sys.stderr.write(f"[Azure get_all_storage] Error processing RG {rg_name}: {str(e)}\n")
-                            sys.stderr.flush()
-                            continue
-                
+                            logger.error("[Azure] Error processing RG %s: %s", rg_name, e)
                 except Exception as e:
-                    sys.stderr.write(f"[Azure get_all_storage] Error processing subscription {subscription_id}: {str(e)}\n")
-                    sys.stderr.flush()
-                    continue
-            
-            sys.stderr.write(f"[Azure get_all_storage] Found {len(result['storage_accounts'])} Storage Accounts, {len(result['containers'])} Containers\n")
-            sys.stderr.flush()
+                    logger.error("[Azure] Error processing subscription %s: %s", subscription_id, e)
+
+            logger.info(
+                "[Azure] Storage: %d accounts, %d containers",
+                len(result['storage_accounts']), len(result['containers']),
+            )
             return result
-        
+
         except Exception as e:
-            import traceback
-            error_msg = f"Error fetching storage resources from Azure: {str(e)}"
-            sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
-            sys.stderr.flush()
-            raise Exception(error_msg)
+            raise Exception(f"Error fetching storage resources from Azure: {e}") from e
 
 # Global instance (lazy initialization)
 _azure_client = None
+_azure_client_lock = threading.Lock()
 
 def get_azure_client():
-    """Get or create the global Azure client instance"""
-    import sys
-    sys.stderr.write("[Azure Client] get_azure_client() called\n")
-    sys.stderr.flush()
-    
+    """Get or create the global Azure client instance."""
     global _azure_client
     if _azure_client is None:
-        sys.stderr.write("[Azure Client] Initializing new Azure client...\n")
-        sys.stderr.flush()
-        try:
-            _azure_client = AzureClient()
-            sys.stderr.write("[Azure Client] Azure client initialized successfully\n")
-            sys.stderr.flush()
-        except ValueError as e:
-            # If Azure credentials are not configured, return None
-            # This allows graceful degradation
-            error_msg = f"[Azure Client] Not available (missing credentials): {str(e)}"
-            sys.stderr.write(f"{error_msg}\n")
-            sys.stderr.flush()
-            return None
-        except Exception as e:
-            # Catch any other initialization errors
-            import traceback
-            error_msg = f"[Azure Client] Initialization failed: {str(e)}"
-            traceback_str = traceback.format_exc()
-            sys.stderr.write(f"{error_msg}\n{traceback_str}\n")
-            sys.stderr.flush()
-            return None
-    else:
-        sys.stderr.write("[Azure Client] Using existing Azure client instance\n")
-        sys.stderr.flush()
+        with _azure_client_lock:
+            if _azure_client is None:  # re-check after acquiring lock
+                try:
+                    _azure_client = AzureClient()
+                    logger.info("[Azure Client] Initialized successfully")
+                except ValueError as e:
+                    logger.warning("[Azure Client] Not available: %s", e)
+                    return None
+                except Exception as e:
+                    logger.error("[Azure Client] Initialization failed: %s", e)
+                    return None
     return _azure_client

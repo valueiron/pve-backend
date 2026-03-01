@@ -1,14 +1,25 @@
-# Production Dockerfile — Gunicorn WSGI server
+# Production Dockerfile — multi-stage build to keep the final image small
+# Stage 1: compile C extensions (cryptography, asyncssh, azure SDKs)
+FROM python:3.12-alpine AS builder
+
+RUN apk add --no-cache git gcc musl-dev libffi-dev
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt gunicorn
+
+# Stage 2: lean runtime image — no compiler toolchain
 FROM python:3.12-alpine
+
+# git is still needed at runtime (asyncssh uses it for known_hosts; some SDKs use it)
+RUN apk add --no-cache git
 
 WORKDIR /app
 
-# gcc + libffi are needed to compile cryptography (pulled in by asyncssh/azure SDKs)
-RUN apk add --no-cache git gcc musl-dev libffi-dev
+# Copy compiled packages from builder
+COPY --from=builder /install /usr/local
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
-
+# Copy application source
 COPY . .
 
 # 5000 = Flask/Gunicorn HTTP  |  5001 = standalone WebSocket server (VNC + SSH terminal)

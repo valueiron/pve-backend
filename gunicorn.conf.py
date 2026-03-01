@@ -12,14 +12,18 @@ accesslog    = "-"        # stdout
 errorlog     = "-"        # stderr
 
 
-def when_ready(server):
+def post_fork(server, worker):
     """
-    Runs in the master/arbiter process once all workers are ready.
-    Starts the standalone WebSocket server (port 5001) as a daemon thread
-    so it lives for the lifetime of the Gunicorn master.
+    Runs inside each worker process after it forks from the master.
+    Starting the WebSocket server here means it shares the same memory space
+    as Flask request handlers, so ssh_sessions written by HTTP routes are
+    immediately visible to the WebSocket session lookup.
+
+    NOTE: with workers > 1, each worker would attempt to bind port 5001 and
+    all but the first would fail. workers = 1 is required for this setup.
     """
     from websocket_server import start_websocket_server
 
     t = threading.Thread(target=start_websocket_server, daemon=True)
     t.start()
-    server.log.info("WebSocket server started on port 5001 (VNC + SSH terminal)")
+    server.log.info("WebSocket server started in worker %s on port 5001", worker.pid)

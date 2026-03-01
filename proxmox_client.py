@@ -3,6 +3,7 @@ Proxmox API Client Module
 Handles connection to Proxmox VE API using direct HTTP requests.
 """
 import os
+import threading
 import requests
 import ipaddress
 from dotenv import load_dotenv
@@ -678,10 +679,13 @@ class ProxmoxClient:
 
 # Global instance (lazy initialization)
 _proxmox_client = None
+_proxmox_client_lock = threading.Lock()
 
 def get_proxmox_client():
-    """Get or create the global Proxmox client instance"""
+    """Get or create the global Proxmox client instance."""
     global _proxmox_client
     if _proxmox_client is None:
-        _proxmox_client = ProxmoxClient()
+        with _proxmox_client_lock:
+            if _proxmox_client is None:  # re-check after acquiring lock
+                _proxmox_client = ProxmoxClient()
     return _proxmox_client

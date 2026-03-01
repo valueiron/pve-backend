@@ -2,49 +2,40 @@
 AWS EC2 API Client Module
 Handles connection to AWS EC2 API using boto3.
 """
+import logging
 import os
 import sys
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
+logger = logging.getLogger(__name__)
+
 # Load environment variables
 load_dotenv()
-
-try:
-    import boto3
-    from botocore.exceptions import ClientError, BotoCoreError
-    BOTO3_AVAILABLE = True
-except ImportError:
-    BOTO3_AVAILABLE = False
 
 class AWSClient:
     """Client for interacting with AWS EC2 API"""
     
     def __init__(self):
         """Initialize AWS API connection using environment variables"""
-        if not BOTO3_AVAILABLE:
-            raise ImportError("boto3 is not installed. Please install it using: pip install boto3")
-        
-        sys.stderr.write("[AWS Client] Initializing AWSClient...\n")
-        sys.stderr.flush()
-        
-        self.access_key_id = os.getenv('AWS_ACCESS_KEY_ID', '').strip()
+        try:
+            import boto3
+            from botocore.exceptions import ClientError
+        except ImportError as exc:
+            raise ImportError("boto3 is not installed. Run: pip install boto3") from exc
+
+        self._ClientError = ClientError  # used in _find_instance_region
+        self.access_key_id     = os.getenv('AWS_ACCESS_KEY_ID', '').strip()
         self.secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY', '').strip()
-        self.region = os.getenv('AWS_REGION', '').strip()
-        self.session_token = os.getenv('AWS_SESSION_TOKEN', '').strip()  # Optional, for temporary credentials
-        
-        sys.stderr.write(f"[AWS Client] Environment check - ACCESS_KEY_ID: {'SET' if self.access_key_id else 'NOT SET'}, SECRET_ACCESS_KEY: {'SET' if self.secret_access_key else 'NOT SET'}, REGION: {'SET' if self.region else 'NOT SET'}\n")
-        sys.stderr.flush()
-        
+        self.region            = os.getenv('AWS_REGION', '').strip()
+        self.session_token     = os.getenv('AWS_SESSION_TOKEN', '').strip()
+
         if not all([self.access_key_id, self.secret_access_key]):
-            error_msg = (
-                "Missing required AWS environment variables. "
-                "Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"
+            raise ValueError(
+                "Missing required AWS environment variables: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"
             )
-            sys.stderr.write(f"[AWS Client] ERROR: {error_msg}\n")
-            sys.stderr.flush()
-            raise ValueError(error_msg)
         
         # Create boto3 session
         session_kwargs = {
@@ -64,11 +55,9 @@ class AWSClient:
         if self.region:
             self.ec2_client = self.session.client('ec2', region_name=self.region)
         else:
-            # Default region if not specified
             self.ec2_client = self.session.client('ec2', region_name='us-east-1')
-        
-        sys.stderr.write("[AWS Client] AWS client initialized successfully\n")
-        sys.stderr.flush()
+
+        logger.info("[AWS Client] Initialized (region=%s)", self.region or 'all')
     
     def _normalize_status(self, state):
         """
@@ -218,8 +207,7 @@ class AWSClient:
             # which would need additional API calls. For now, we return defaults.
             
         except Exception as e:
-            sys.stderr.write(f"[AWS Client] Warning: Could not get metrics for instance {instance.get('InstanceId', 'unknown')}: {str(e)}\n")
-            sys.stderr.flush()
+            logger.warning("[AWS] Could not get metrics for instance %s: %s", instance.get('InstanceId', 'unknown'), e)
         
         return metrics
     
@@ -236,150 +224,82 @@ class AWSClient:
             regions = [region['RegionName'] for region in response['Regions']]
             return regions
         except Exception as e:
-            sys.stderr.write(f"[AWS Client] Warning: Could not list regions: {str(e)}\n")
-            sys.stderr.flush()
+            logger.warning("[AWS] Could not list regions: %s", e)
             # Return default regions if listing fails
             return [self.region] if self.region else ['us-east-1']
     
+    def _fetch_region_vms(self, region):
+        """Fetch all EC2 instances in a single region. Runs in a thread pool."""
+        ec2_client = self.session.client('ec2', region_name=region)
+        instances = []
+        paginator = ec2_client.get_paginator('describe_instances')
+        for page in paginator.paginate():
+            for reservation in page.get('Reservations', []):
+                for instance in reservation.get('Instances', []):
+                    instance_id       = instance.get('InstanceId', '')
+                    state             = instance.get('State', {}).get('Name', 'unknown')
+                    metrics           = self._get_instance_metrics(instance)
+                    availability_zone = instance.get('Placement', {}).get('AvailabilityZone', region)
+                    instance_type     = instance.get('InstanceType', 'unknown')
+
+                    name = instance_id
+                    for tag in instance.get('Tags', []):
+                        if tag.get('Key') == 'Name':
+                            name = tag.get('Value', instance_id)
+                            break
+
+                    vm_info = {
+                        'vmid':              self._generate_instance_id(instance_id, region),
+                        'name':              name,
+                        'status':            self._normalize_status(state),
+                        'node':              availability_zone,
+                        'type':              'aws',
+                        'cpu':               metrics['cpu'],
+                        'mem':               metrics['mem'],
+                        'maxmem':            metrics['maxmem'],
+                        'disk':              metrics['disk'],
+                        'maxdisk':           metrics['maxdisk'],
+                        'uptime':            metrics['uptime'],
+                        'region':            region,
+                        'instance_id':       instance_id,
+                        'instance_type':     instance_type,
+                        'availability_zone': availability_zone,
+                        'tags':              self._extract_tags(instance),
+                    }
+                    if instance.get('PublicIpAddress'):
+                        vm_info['public_ip'] = instance['PublicIpAddress']
+                    if instance.get('PrivateIpAddress'):
+                        vm_info['private_ip'] = instance['PrivateIpAddress']
+                    instances.append(vm_info)
+        return instances
+
     def get_all_vms(self):
         """
-        Fetch all EC2 instances from all regions (or configured region).
-        
+        Fetch all EC2 instances from all regions (or configured region) in parallel.
+
         Returns:
             list: List of dictionaries containing VM information
         """
-        sys.stderr.write("[AWS get_all_vms] Starting instance fetch...\n")
-        sys.stderr.flush()
-        
+        logger.info("[AWS] Starting instance fetch")
+        regions = [self.region] if self.region else self._get_all_regions()
+        if not regions:
+            logger.warning("[AWS] No regions found")
+            return []
+
         all_instances = []
-        
-        try:
-            # Determine which regions to search
-            if self.region:
-                regions = [self.region]
-                sys.stderr.write(f"[AWS get_all_vms] Using configured region: {self.region}\n")
-                sys.stderr.flush()
-            else:
-                # Search all regions
-                regions = self._get_all_regions()
-                sys.stderr.write(f"[AWS get_all_vms] Searching {len(regions)} region(s)\n")
-                sys.stderr.flush()
-            
-            if not regions:
-                sys.stderr.write("[AWS get_all_vms] WARNING: No regions found!\n")
-                sys.stderr.flush()
-                return all_instances
-            
-            # Iterate through regions
-            for region in regions:
+        with ThreadPoolExecutor(max_workers=min(len(regions), 10)) as executor:
+            futures = {executor.submit(self._fetch_region_vms, r): r for r in regions}
+            for future in as_completed(futures):
+                region = futures[future]
                 try:
-                    sys.stderr.write(f"[AWS get_all_vms] Processing region: {region}\n")
-                    sys.stderr.flush()
-                    
-                    # Create EC2 client for this region
-                    ec2_client = self.session.client('ec2', region_name=region)
-                    
-                    # List all instances in this region
-                    sys.stderr.write(f"[AWS get_all_vms] Listing instances in region {region}...\n")
-                    sys.stderr.flush()
-                    
-                    paginator = ec2_client.get_paginator('describe_instances')
-                    instance_count = 0
-                    processed_count = 0
-                    
-                    for page in paginator.paginate():
-                        for reservation in page.get('Reservations', []):
-                            for instance in reservation.get('Instances', []):
-                                instance_count += 1
-                                
-                                instance_id = instance.get('InstanceId', '')
-                                state = instance.get('State', {}).get('Name', 'unknown')
-                                
-                                sys.stderr.write(f"[AWS get_all_vms] Found instance {instance_count}: {instance_id} (State: {state})\n")
-                                sys.stderr.flush()
-                                
-                                try:
-                                    # Get metrics
-                                    metrics = self._get_instance_metrics(instance)
-                                    
-                                    # Get instance name from tags
-                                    name = instance_id
-                                    for tag in instance.get('Tags', []):
-                                        if tag.get('Key') == 'Name':
-                                            name = tag.get('Value', instance_id)
-                                            break
-                                    
-                                    # Get instance type
-                                    instance_type = instance.get('InstanceType', 'unknown')
-                                    
-                                    # Get availability zone (use as "node")
-                                    availability_zone = instance.get('Placement', {}).get('AvailabilityZone', region)
-                                    
-                                    # Normalize VM data to match Proxmox structure
-                                    vm_id = self._generate_instance_id(instance_id, region)
-                                    
-                                    # Extract tags
-                                    tags = self._extract_tags(instance)
-                                    
-                                    vm_info = {
-                                        'vmid': vm_id,
-                                        'name': name,
-                                        'status': self._normalize_status(state),
-                                        'node': availability_zone,  # Use availability zone as "node"
-                                        'type': 'aws',
-                                        'cpu': metrics['cpu'],
-                                        'mem': metrics['mem'],
-                                        'maxmem': metrics['maxmem'],
-                                        'disk': metrics['disk'],
-                                        'maxdisk': metrics['maxdisk'],
-                                        'uptime': metrics['uptime'],
-                                        'region': region,
-                                        'instance_id': instance_id,
-                                        'instance_type': instance_type,
-                                        'availability_zone': availability_zone,
-                                        'tags': tags
-                                    }
-                                    
-                                    # Add network info if available
-                                    if instance.get('PublicIpAddress'):
-                                        vm_info['public_ip'] = instance['PublicIpAddress']
-                                    if instance.get('PrivateIpAddress'):
-                                        vm_info['private_ip'] = instance['PrivateIpAddress']
-                                    
-                                    all_instances.append(vm_info)
-                                    processed_count += 1
-                                    sys.stderr.write(f"[AWS get_all_vms] Successfully processed instance: {name} ({instance_id})\n")
-                                    sys.stderr.flush()
-                                    
-                                except Exception as e:
-                                    # Log error but continue with other instances
-                                    import traceback
-                                    sys.stderr.write(f"[AWS get_all_vms] Error processing instance {instance_id}: {str(e)}\n")
-                                    sys.stderr.write(f"[AWS get_all_vms] Traceback: {traceback.format_exc()}\n")
-                                    sys.stderr.flush()
-                                    continue
-                    
-                    sys.stderr.write(f"[AWS get_all_vms] Processed {instance_count} instance(s) from region {region}, successfully added {processed_count} to list\n")
-                    sys.stderr.flush()
-                
+                    instances = future.result()
+                    all_instances.extend(instances)
+                    logger.info("[AWS] Fetched %d instance(s) from %s", len(instances), region)
                 except Exception as e:
-                    # Log error but continue with other regions
-                    import traceback
-                    sys.stderr.write(f"[AWS get_all_vms] Error fetching instances from region {region}: {str(e)}\n")
-                    sys.stderr.write(f"[AWS get_all_vms] Traceback: {traceback.format_exc()}\n")
-                    sys.stderr.flush()
-                    continue
-            
-            sys.stderr.write(f"[AWS get_all_vms] Total AWS instances found: {len(all_instances)}\n")
-            sys.stderr.flush()
-            return all_instances
-        
-        except Exception as e:
-            import traceback
-            error_msg = f"Error fetching instances from AWS: {str(e)}"
-            sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
-            sys.stderr.flush()
-            raise Exception(error_msg)
+                    logger.error("[AWS] Error fetching instances from %s: %s", region, e)
+
+        logger.info("[AWS] Total AWS instances found: %d", len(all_instances))
+        return all_instances
     
     def _find_instance_region(self, instance_id):
         """
@@ -399,7 +319,7 @@ class AWSClient:
                 response = ec2_client.describe_instances(InstanceIds=[instance_id])
                 if response.get('Reservations'):
                     return region
-            except ClientError:
+            except self._ClientError:
                 # Instance not in this region, continue
                 continue
         
@@ -558,283 +478,175 @@ class AWSClient:
         except Exception as e:
             raise Exception(f"Error stopping instance {vm_id}: {str(e)}")
     
+    def _fetch_region_networking(self, region):
+        """Fetch all networking resources in a single region. Runs in a thread pool."""
+        ec2_client = self.session.client('ec2', region_name=region)
+        vpcs, subnets, security_groups, elastic_ips = [], [], [], []
+
+        for vpc in ec2_client.describe_vpcs().get('Vpcs', []):
+            info = {
+                'id':            vpc['VpcId'],
+                'name':          None,
+                'cidr_block':    vpc.get('CidrBlock', ''),
+                'state':         vpc.get('State', ''),
+                'region':        region,
+                'type':          'aws',
+                'resource_type': 'vpc',
+                'tags':          self._extract_tags(vpc),
+            }
+            for tag in vpc.get('Tags', []):
+                if tag.get('Key') == 'Name':
+                    info['name'] = tag.get('Value')
+                    break
+            vpcs.append(info)
+
+        for subnet in ec2_client.describe_subnets().get('Subnets', []):
+            info = {
+                'id':                subnet['SubnetId'],
+                'name':              None,
+                'vpc_id':            subnet.get('VpcId', ''),
+                'cidr_block':        subnet.get('CidrBlock', ''),
+                'availability_zone': subnet.get('AvailabilityZone', ''),
+                'state':             subnet.get('State', ''),
+                'region':            region,
+                'type':              'aws',
+                'resource_type':     'subnet',
+                'tags':              self._extract_tags(subnet),
+            }
+            for tag in subnet.get('Tags', []):
+                if tag.get('Key') == 'Name':
+                    info['name'] = tag.get('Value')
+                    break
+            subnets.append(info)
+
+        for sg in ec2_client.describe_security_groups().get('SecurityGroups', []):
+            security_groups.append({
+                'id':            sg['GroupId'],
+                'name':          sg.get('GroupName', ''),
+                'vpc_id':        sg.get('VpcId', ''),
+                'description':   sg.get('Description', ''),
+                'region':        region,
+                'type':          'aws',
+                'resource_type': 'security_group',
+                'tags':          self._extract_tags(sg),
+            })
+
+        for eip in ec2_client.describe_addresses().get('Addresses', []):
+            elastic_ips.append({
+                'id':            eip.get('AllocationId', eip.get('PublicIp', '')),
+                'name':          None,
+                'public_ip':     eip.get('PublicIp', ''),
+                'private_ip':    eip.get('PrivateIpAddress', ''),
+                'instance_id':   eip.get('InstanceId', ''),
+                'domain':        eip.get('Domain', 'vpc'),
+                'region':        region,
+                'type':          'aws',
+                'resource_type': 'elastic_ip',
+                'tags':          self._extract_tags(eip),
+            })
+
+        return vpcs, subnets, security_groups, elastic_ips
+
     def get_all_networking(self):
         """
-        Fetch all networking resources (VPCs, Subnets, Security Groups, Elastic IPs).
-        
+        Fetch all networking resources (VPCs, Subnets, Security Groups, Elastic IPs) in parallel.
+
         Returns:
             dict: Dictionary containing lists of networking resources
         """
-        sys.stderr.write("[AWS get_all_networking] Starting networking fetch...\n")
-        sys.stderr.flush()
-        
-        result = {
-            'vpcs': [],
-            'subnets': [],
-            'security_groups': [],
-            'elastic_ips': []
-        }
-        
-        try:
-            # Determine which regions to search
-            if self.region:
-                regions = [self.region]
-            else:
-                regions = self._get_all_regions()
-            
-            for region in regions:
+        logger.info("[AWS] Starting networking fetch")
+        result = {'vpcs': [], 'subnets': [], 'security_groups': [], 'elastic_ips': []}
+        regions = [self.region] if self.region else self._get_all_regions()
+
+        with ThreadPoolExecutor(max_workers=min(len(regions), 10)) as executor:
+            futures = {executor.submit(self._fetch_region_networking, r): r for r in regions}
+            for future in as_completed(futures):
+                region = futures[future]
                 try:
-                    sys.stderr.write(f"[AWS get_all_networking] Processing region: {region}\n")
-                    sys.stderr.flush()
-                    
-                    ec2_client = self.session.client('ec2', region_name=region)
-                    
-                    # Get VPCs
-                    try:
-                        vpcs = ec2_client.describe_vpcs()
-                        for vpc in vpcs.get('Vpcs', []):
-                            vpc_info = {
-                                'id': vpc['VpcId'],
-                                'name': None,
-                                'cidr_block': vpc.get('CidrBlock', ''),
-                                'state': vpc.get('State', ''),
-                                'region': region,
-                                'type': 'aws',
-                                'resource_type': 'vpc',
-                                'tags': self._extract_tags(vpc)
-                            }
-                            # Get name from tags
-                            for tag in vpc.get('Tags', []):
-                                if tag.get('Key') == 'Name':
-                                    vpc_info['name'] = tag.get('Value')
-                                    break
-                            result['vpcs'].append(vpc_info)
-                    except Exception as e:
-                        sys.stderr.write(f"[AWS get_all_networking] Error fetching VPCs in {region}: {str(e)}\n")
-                        sys.stderr.flush()
-                    
-                    # Get Subnets
-                    try:
-                        subnets = ec2_client.describe_subnets()
-                        for subnet in subnets.get('Subnets', []):
-                            subnet_info = {
-                                'id': subnet['SubnetId'],
-                                'name': None,
-                                'vpc_id': subnet.get('VpcId', ''),
-                                'cidr_block': subnet.get('CidrBlock', ''),
-                                'availability_zone': subnet.get('AvailabilityZone', ''),
-                                'state': subnet.get('State', ''),
-                                'region': region,
-                                'type': 'aws',
-                                'resource_type': 'subnet',
-                                'tags': self._extract_tags(subnet)
-                            }
-                            # Get name from tags
-                            for tag in subnet.get('Tags', []):
-                                if tag.get('Key') == 'Name':
-                                    subnet_info['name'] = tag.get('Value')
-                                    break
-                            result['subnets'].append(subnet_info)
-                    except Exception as e:
-                        sys.stderr.write(f"[AWS get_all_networking] Error fetching Subnets in {region}: {str(e)}\n")
-                        sys.stderr.flush()
-                    
-                    # Get Security Groups
-                    try:
-                        security_groups = ec2_client.describe_security_groups()
-                        for sg in security_groups.get('SecurityGroups', []):
-                            sg_info = {
-                                'id': sg['GroupId'],
-                                'name': sg.get('GroupName', ''),
-                                'vpc_id': sg.get('VpcId', ''),
-                                'description': sg.get('Description', ''),
-                                'region': region,
-                                'type': 'aws',
-                                'resource_type': 'security_group',
-                                'tags': self._extract_tags(sg)
-                            }
-                            result['security_groups'].append(sg_info)
-                    except Exception as e:
-                        sys.stderr.write(f"[AWS get_all_networking] Error fetching Security Groups in {region}: {str(e)}\n")
-                        sys.stderr.flush()
-                    
-                    # Get Elastic IPs
-                    try:
-                        elastic_ips = ec2_client.describe_addresses()
-                        for eip in elastic_ips.get('Addresses', []):
-                            eip_info = {
-                                'id': eip.get('AllocationId', eip.get('PublicIp', '')),
-                                'name': None,
-                                'public_ip': eip.get('PublicIp', ''),
-                                'private_ip': eip.get('PrivateIpAddress', ''),
-                                'instance_id': eip.get('InstanceId', ''),
-                                'domain': eip.get('Domain', 'vpc'),
-                                'region': region,
-                                'type': 'aws',
-                                'resource_type': 'elastic_ip',
-                                'tags': self._extract_tags(eip)
-                            }
-                            result['elastic_ips'].append(eip_info)
-                    except Exception as e:
-                        sys.stderr.write(f"[AWS get_all_networking] Error fetching Elastic IPs in {region}: {str(e)}\n")
-                        sys.stderr.flush()
-                
+                    vpcs, subnets, sgs, eips = future.result()
+                    result['vpcs'].extend(vpcs)
+                    result['subnets'].extend(subnets)
+                    result['security_groups'].extend(sgs)
+                    result['elastic_ips'].extend(eips)
                 except Exception as e:
-                    sys.stderr.write(f"[AWS get_all_networking] Error processing region {region}: {str(e)}\n")
-                    sys.stderr.flush()
-                    continue
-            
-            sys.stderr.write(f"[AWS get_all_networking] Found {len(result['vpcs'])} VPCs, {len(result['subnets'])} Subnets, {len(result['security_groups'])} Security Groups, {len(result['elastic_ips'])} Elastic IPs\n")
-            sys.stderr.flush()
-            return result
-        
-        except Exception as e:
-            import traceback
-            error_msg = f"Error fetching networking resources from AWS: {str(e)}"
-            sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
-            sys.stderr.flush()
-            raise Exception(error_msg)
+                    logger.error("[AWS] Error fetching networking from %s: %s", region, e)
+
+        logger.info(
+            "[AWS] Networking: %d VPCs, %d Subnets, %d SGs, %d EIPs",
+            len(result['vpcs']), len(result['subnets']),
+            len(result['security_groups']), len(result['elastic_ips']),
+        )
+        return result
     
     def get_all_storage(self):
         """
         Fetch all S3 buckets.
-        
+
         Returns:
             dict: Dictionary containing list of S3 buckets
         """
-        sys.stderr.write("[AWS get_all_storage] Starting S3 bucket fetch...\n")
-        sys.stderr.flush()
-        
-        result = {
-            'buckets': []
-        }
-        
+        logger.info("[AWS] Starting S3 bucket fetch")
+        result = {'buckets': []}
+        s3_region = self.region if self.region else 'us-east-1'
+        s3_client = self.session.client('s3', region_name=s3_region)
+
         try:
-            # S3 is a global service, but we can use any region for the client
-            # We'll use the configured region or default to us-east-1
-            s3_region = self.region if self.region else 'us-east-1'
-            
-            # Create S3 client
-            s3_client = self.session.client('s3', region_name=s3_region)
-            
-            try:
-                # List all buckets
-                response = s3_client.list_buckets()
-                
-                for bucket in response.get('Buckets', []):
-                    bucket_name = bucket.get('Name', '')
-                    creation_date = bucket.get('CreationDate', None)
-                    
-                    # Get bucket location/region
-                    try:
-                        location_response = s3_client.get_bucket_location(Bucket=bucket_name)
-                        bucket_region = location_response.get('LocationConstraint', 'us-east-1')
-                        # us-east-1 returns None, so handle that
-                        if bucket_region is None:
-                            bucket_region = 'us-east-1'
-                    except Exception as e:
-                        sys.stderr.write(f"[AWS get_all_storage] Could not get location for bucket {bucket_name}: {str(e)}\n")
-                        sys.stderr.flush()
-                        bucket_region = s3_region
-                    
-                    # Get bucket size and object count (this can be slow for large buckets)
-                    # We'll try to get basic info, but won't fail if we can't
-                    size_bytes = 0
-                    object_count = 0
-                    try:
-                        # Use CloudWatch metrics or list objects (limited to first 1000)
-                        # For now, we'll just get basic info
-                        paginator = s3_client.get_paginator('list_objects_v2')
-                        for page in paginator.paginate(Bucket=bucket_name, MaxKeys=1000):
-                            if 'Contents' in page:
-                                object_count += len(page['Contents'])
-                                for obj in page['Contents']:
-                                    size_bytes += obj.get('Size', 0)
-                    except Exception as e:
-                        # If we can't get size info, continue with defaults
-                        sys.stderr.write(f"[AWS get_all_storage] Could not get size info for bucket {bucket_name}: {str(e)}\n")
-                        sys.stderr.flush()
-                    
-                    # Get bucket tags
-                    tags = []
-                    try:
-                        # S3 bucket tags require a separate API call
-                        bucket_tagging = s3_client.get_bucket_tagging(Bucket=bucket_name)
-                        if 'TagSet' in bucket_tagging:
-                            tags = [tag.get('Key', '') for tag in bucket_tagging['TagSet'] if tag.get('Key') and tag.get('Key') != 'Name']
-                    except Exception as e:
-                        # Bucket might not have tags or we might not have permission
-                        # This is not critical, so we continue
-                        pass
-                    
-                    bucket_info = {
-                        'id': bucket_name,
-                        'name': bucket_name,
-                        'region': bucket_region,
-                        'creation_date': creation_date.isoformat() if creation_date else None,
-                        'size_bytes': size_bytes,
-                        'object_count': object_count,
-                        'type': 'aws',
-                        'resource_type': 's3_bucket',
-                        'tags': tags
-                    }
-                    
-                    result['buckets'].append(bucket_info)
-                
-                sys.stderr.write(f"[AWS get_all_storage] Found {len(result['buckets'])} S3 buckets\n")
-                sys.stderr.flush()
-                return result
-            
-            except Exception as e:
-                sys.stderr.write(f"[AWS get_all_storage] Error listing S3 buckets: {str(e)}\n")
-                sys.stderr.flush()
-                return result
-        
+            response = s3_client.list_buckets()
+
+            for bucket in response.get('Buckets', []):
+                bucket_name   = bucket.get('Name', '')
+                creation_date = bucket.get('CreationDate')
+
+                try:
+                    loc = s3_client.get_bucket_location(Bucket=bucket_name)
+                    bucket_region = loc.get('LocationConstraint') or 'us-east-1'
+                except Exception:
+                    bucket_region = s3_region
+
+                tags = []
+                try:
+                    tagging = s3_client.get_bucket_tagging(Bucket=bucket_name)
+                    tags = [
+                        tag.get('Key', '') for tag in tagging.get('TagSet', [])
+                        if tag.get('Key') and tag.get('Key') != 'Name'
+                    ]
+                except Exception:
+                    pass
+
+                result['buckets'].append({
+                    'id':            bucket_name,
+                    'name':          bucket_name,
+                    'region':        bucket_region,
+                    'creation_date': creation_date.isoformat() if creation_date else None,
+                    'type':          'aws',
+                    'resource_type': 's3_bucket',
+                    'tags':          tags,
+                })
+
+            logger.info("[AWS] Found %d S3 bucket(s)", len(result['buckets']))
+            return result
+
         except Exception as e:
-            import traceback
-            error_msg = f"Error fetching S3 buckets from AWS: {str(e)}"
-            sys.stderr.write(f"{error_msg}\n{traceback.format_exc()}\n")
-            sys.stderr.flush()
-            raise Exception(error_msg)
+            logger.error("[AWS] Error listing S3 buckets: %s", e)
+            return result
 
 # Global instance (lazy initialization)
 _aws_client = None
+_aws_client_lock = threading.Lock()
 
 def get_aws_client():
-    """Get or create the global AWS client instance"""
-    sys.stderr.write("[AWS Client] get_aws_client() called\n")
-    sys.stderr.flush()
-    
+    """Get or create the global AWS client instance."""
     global _aws_client
     if _aws_client is None:
-        sys.stderr.write("[AWS Client] Initializing new AWS client...\n")
-        sys.stderr.flush()
-        try:
-            _aws_client = AWSClient()
-            sys.stderr.write("[AWS Client] AWS client initialized successfully\n")
-            sys.stderr.flush()
-        except ValueError as e:
-            # If AWS credentials are not configured, return None
-            # This allows graceful degradation
-            error_msg = f"[AWS Client] Not available (missing credentials): {str(e)}"
-            sys.stderr.write(f"{error_msg}\n")
-            sys.stderr.flush()
-            return None
-        except ImportError as e:
-            # If boto3 is not installed
-            error_msg = f"[AWS Client] Not available (boto3 not installed): {str(e)}"
-            sys.stderr.write(f"{error_msg}\n")
-            sys.stderr.flush()
-            return None
-        except Exception as e:
-            # Catch any other initialization errors
-            import traceback
-            error_msg = f"[AWS Client] Initialization failed: {str(e)}"
-            traceback_str = traceback.format_exc()
-            sys.stderr.write(f"{error_msg}\n{traceback_str}\n")
-            sys.stderr.flush()
-            return None
-    else:
-        sys.stderr.write("[AWS Client] Using existing AWS client instance\n")
-        sys.stderr.flush()
+        with _aws_client_lock:
+            if _aws_client is None:  # re-check after acquiring lock
+                try:
+                    _aws_client = AWSClient()
+                    logger.info("[AWS Client] Initialized successfully")
+                except (ValueError, ImportError) as e:
+                    logger.warning("[AWS Client] Not available: %s", e)
+                    return None
+                except Exception as e:
+                    logger.error("[AWS Client] Initialization failed: %s", e)
+                    return None
     return _aws_client
