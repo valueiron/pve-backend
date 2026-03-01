@@ -201,7 +201,7 @@ async def ssh_terminal_handler(browser_ws):
                                     proc.stdin.write(data.encode('utf-8'))
                             else:
                                 proc.stdin.write(message.encode('utf-8'))
-                        except json.JSONDecodeError:
+                        except (json.JSONDecodeError, AttributeError, TypeError):
                             proc.stdin.write(message.encode('utf-8'))
                     else:
                         proc.stdin.write(message)
