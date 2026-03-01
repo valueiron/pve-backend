@@ -1,0 +1,6 @@
+.git
+.gitignore
+.env
+.env.example
+.dockerignore
+openapi.json
