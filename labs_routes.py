@@ -124,6 +124,16 @@ def launch_lab(lab_id: str):
     except KeyError:
         return _err(f"Lab '{lab_id}' not found", 404)
 
+    # Local dockerk8s launch — no GitHub Actions required
+    if lab.get("type") == "dockerk8s":
+        try:
+            lc.launch_dockerk8s_lab(lab_id)
+            return jsonify({"run_triggered": True})
+        except RuntimeError as e:
+            return _err(str(e), 422)
+        except Exception as e:
+            return _err(str(e), 500)
+
     # Resolve the repo URL for this lab
     repos = lc.get_repos()
     repo = next((r for r in repos if r["id"] == lab["repo_id"]), None)
@@ -166,12 +176,37 @@ def register_lab_vms(lab_id: str):
         return _err(str(e), 500)
 
 
+@labs_bp.post("/<path:lab_id>/stop")
+def stop_lab(lab_id: str):
+    try:
+        lab = lc.get_lab(lab_id)
+    except KeyError:
+        return _err(f"Lab '{lab_id}' not found", 404)
+
+    if lab.get("type") == "dockerk8s":
+        try:
+            lc.stop_dockerk8s_lab(lab_id)
+            return jsonify({"stopped": True})
+        except Exception as e:
+            return _err(str(e), 500)
+
+    return _err("Stop is only supported for dockerk8s labs", 400)
+
+
 @labs_bp.get("/<path:lab_id>/status")
 def get_lab_status(lab_id: str):
     try:
         lab = lc.get_lab(lab_id)
     except KeyError:
         return _err(f"Lab '{lab_id}' not found", 404)
+
+    # Local dockerk8s status — check container/pod state directly
+    if lab.get("type") == "dockerk8s":
+        try:
+            status = lc.get_dockerk8s_status(lab_id)
+            return jsonify(status)
+        except Exception as e:
+            return _err(str(e), 500)
 
     repos = lc.get_repos()
     repo = next((r for r in repos if r["id"] == lab["repo_id"]), None)
