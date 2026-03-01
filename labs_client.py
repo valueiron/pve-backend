@@ -23,6 +23,9 @@ LABS_DIR = Path(os.getenv("LABS_DIR", "./labs_repos")).resolve()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 DOCKER_API_URL = os.getenv("DOCKER_API_URL", "http://localhost:8080")
 K8S_API_URL = os.getenv("K8S_API_URL", "http://localhost:8081")
+# Docker network that the portal's nginx container is attached to.
+# The code-server container is connected to this network so nginx can proxy to it.
+PORTAL_NETWORK = os.getenv("PORTAL_NETWORK", "portal_portal-network")
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +276,9 @@ def get_lab_vms(lab_id: str) -> list:
 
     if lab.get("type") == "dockerk8s":
         return _get_dockerk8s_targets(lab_id)
+
+    if lab.get("type") == "codeserver":
+        return _get_codeserver_targets(lab_id)
 
     static_vms = lab.get("vms", [])
     data = _load_lab_vms()
@@ -532,6 +538,136 @@ def _get_dockerk8s_targets(lab_id: str) -> list:
             pass
 
     return targets
+
+
+# ---------------------------------------------------------------------------
+# code-server lab support
+# ---------------------------------------------------------------------------
+
+# Fixed container name — nginx.conf has a static /codeserver/ proxy pointing here.
+_CODESERVER_CONTAINER_NAME = "lab-codeserver"
+
+
+def launch_codeserver_lab(lab_id: str) -> dict:
+    """Provision the code-server Docker container for a codeserver lab.
+
+    Uses a fixed container name (lab-codeserver) so nginx can proxy to it by name.
+    The container is attached to PORTAL_NETWORK after creation so nginx can reach it.
+    """
+    # Remove any existing container with the same name first (idempotent re-launch).
+    try:
+        requests.delete(
+            f"{DOCKER_API_URL}/containers/{_CODESERVER_CONTAINER_NAME}",
+            params={"force": "true"},
+            timeout=30,
+        )
+    except Exception:
+        pass
+
+    resp = requests.post(
+        f"{DOCKER_API_URL}/containers/run",
+        json={
+            "image": "codercom/code-server:latest",
+            "name": _CODESERVER_CONTAINER_NAME,
+            "command": ["--auth", "none"],
+            "labels": {"app": "lab-codeserver", "lab": lab_id},
+        },
+        timeout=180,  # image pull may take a while
+    )
+    if not resp.ok:
+        raise RuntimeError(f"Failed to create code-server container: {resp.text}")
+
+    container_id = resp.json()["id"]
+
+    # Connect to the portal network so nginx (in the same network) can reach the container.
+    try:
+        requests.post(
+            f"{DOCKER_API_URL}/networks/{PORTAL_NETWORK}/connect",
+            json={"container": container_id},
+            timeout=15,
+        )
+    except Exception:
+        pass  # Non-fatal — the /codeserver/ proxy may still work if nginx resolves by name.
+
+    state_entry = {
+        "type": "codeserver",
+        "launched_at": _now_iso(),
+        "container_id": container_id,
+        "container_name": _CODESERVER_CONTAINER_NAME,
+    }
+    state = _load_lab_state()
+    state[lab_id] = state_entry
+    _save_lab_state(state)
+    return state_entry
+
+
+def stop_codeserver_lab(lab_id: str) -> None:
+    """Remove the code-server container."""
+    state = _load_lab_state()
+    entry = state.get(lab_id)
+    if not entry:
+        return
+
+    container_id = entry.get("container_id")
+    if container_id:
+        try:
+            requests.delete(
+                f"{DOCKER_API_URL}/containers/{container_id}",
+                params={"force": "true"},
+                timeout=30,
+            )
+        except Exception:
+            pass
+
+    del state[lab_id]
+    _save_lab_state(state)
+
+
+def get_codeserver_status(lab_id: str) -> dict:
+    """Return a status dict for a codeserver lab (mirrors get_lab_run_status shape)."""
+    state = _load_lab_state()
+    entry = state.get(lab_id)
+    if not entry:
+        return {"status": "idle", "conclusion": None, "run_id": None, "html_url": None}
+
+    container_id = entry.get("container_id")
+    if not container_id:
+        return {"status": "idle", "conclusion": None, "run_id": None, "html_url": None}
+
+    try:
+        resp = requests.get(f"{DOCKER_API_URL}/containers/{container_id}", timeout=10)
+        if resp.ok and resp.json().get("State", {}).get("Status") == "running":
+            return {"status": "completed", "conclusion": "success", "run_id": None, "html_url": None}
+    except Exception:
+        pass
+
+    return {"status": "in_progress", "conclusion": None, "run_id": None, "html_url": None}
+
+
+def _get_codeserver_targets(lab_id: str) -> list:
+    """Return the code-server iframe target when the container is running."""
+    state = _load_lab_state()
+    entry = state.get(lab_id)
+    if not entry:
+        return []
+
+    container_id = entry.get("container_id")
+    if not container_id:
+        return []
+
+    try:
+        resp = requests.get(f"{DOCKER_API_URL}/containers/{container_id}", timeout=10)
+        if resp.ok and resp.json().get("State", {}).get("Status") == "running":
+            return [{
+                "vmid": "codeserver",
+                "name": "VS Code",
+                "type": "codeserver",
+                "proxy_path": "/codeserver/",
+            }]
+    except Exception:
+        pass
+
+    return []
 
 
 # ---------------------------------------------------------------------------
