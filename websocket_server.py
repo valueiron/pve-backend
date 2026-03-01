@@ -12,6 +12,11 @@ import logging
 import ssl
 import urllib.parse
 
+# websocket-client opcode constants
+_WS_OP_TEXT   = 1
+_WS_OP_BINARY = 2
+_WS_OP_CLOSE  = 8
+
 import asyncssh
 import websocket as ws_client
 import websockets
@@ -68,11 +73,11 @@ async def vnc_websocket_handler(browser_ws):
                     opcode, data = await loop.run_in_executor(
                         None, lambda: proxmox_ws.recv_data(control_frame=True)
                     )
-                    if opcode == 8:  # close
+                    if opcode == _WS_OP_CLOSE:
                         break
-                    if opcode == 2 and data:  # binary
+                    if opcode == _WS_OP_BINARY and data:
                         await browser_ws.send(data)
-                    elif opcode == 1 and data:  # text
+                    elif opcode == _WS_OP_TEXT and data:
                         await browser_ws.send(data.decode('utf-8', errors='replace'))
                 except Exception as e:
                     logger.error("[VNC WS] Proxmox->browser error VM %s: %s: %s", vmid, type(e).__name__, e)
@@ -144,7 +149,7 @@ async def ssh_terminal_handler(browser_ws):
         )
     except Exception as e:
         logger.error("[SSH WS] Connection failed for session %s: %s", session_id, e)
-        await browser_ws.send(f'{{"type":"error","message":"SSH connection failed: {str(e)}"}}')
+        await browser_ws.send(json.dumps({"type": "error", "message": f"SSH connection failed: {str(e)}"}))
         await browser_ws.close(1011, 'SSH connection failed')
         with ssh_sessions._ssh_sessions_lock:
             ssh_sessions._ssh_sessions.pop(session_id, None)

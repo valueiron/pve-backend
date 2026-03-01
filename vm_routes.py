@@ -5,8 +5,10 @@ Covers: /api/vms, /api/nodes, /api/azure/status, /api/aws/status
 """
 
 import logging
+import os
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Blueprint, jsonify, request
 
@@ -25,41 +27,39 @@ vm_bp = Blueprint('vm', __name__)
 def get_vms():
     """List all VMs across Proxmox, Azure, and AWS."""
     try:
-        all_vms = []
-
-        try:
+        def _fetch_proxmox():
             proxmox = get_proxmox_client()
-            proxmox_vms = proxmox.get_all_vms()
-            for vm in proxmox_vms:
+            vms = proxmox.get_all_vms()
+            for vm in vms:
                 vm['type'] = 'proxmox'
-            all_vms.extend(proxmox_vms)
-            logger.info("[VM API] Fetched %d Proxmox VMs", len(proxmox_vms))
-        except Exception as e:
-            logger.warning("[VM API] Failed to fetch Proxmox VMs: %s", e)
+            return ('proxmox', vms)
 
-        logger.info("[VM API] Attempting Azure VMs (available=%s)", config.AZURE_AVAILABLE)
-        try:
+        def _fetch_azure():
+            if not config.AZURE_AVAILABLE:
+                return ('azure', [])
             azure = config.get_azure_client()
-            if azure:
-                azure_vms = azure.get_all_vms()
-                all_vms.extend(azure_vms)
-                logger.info("[VM API] Fetched %d Azure VMs", len(azure_vms))
-            else:
-                logger.info("[VM API] Azure client not available")
-        except Exception as e:
-            logger.error("[VM API] Failed to fetch Azure VMs: %s\n%s", e, traceback.format_exc())
+            return ('azure', azure.get_all_vms() if azure else [])
 
-        logger.info("[VM API] Attempting AWS instances (available=%s)", config.AWS_AVAILABLE)
-        try:
+        def _fetch_aws():
+            if not config.AWS_AVAILABLE:
+                return ('aws', [])
             aws = config.get_aws_client()
-            if aws:
-                aws_vms = aws.get_all_vms()
-                all_vms.extend(aws_vms)
-                logger.info("[VM API] Fetched %d AWS instances", len(aws_vms))
-            else:
-                logger.info("[VM API] AWS client not available")
-        except Exception as e:
-            logger.error("[VM API] Failed to fetch AWS instances: %s\n%s", e, traceback.format_exc())
+            return ('aws', aws.get_all_vms() if aws else [])
+
+        all_vms = []
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [
+                executor.submit(_fetch_proxmox),
+                executor.submit(_fetch_azure),
+                executor.submit(_fetch_aws),
+            ]
+            for future in as_completed(futures):
+                try:
+                    source, vms = future.result()
+                    all_vms.extend(vms)
+                    logger.info("[VM API] Fetched %d %s VMs", len(vms), source)
+                except Exception as e:
+                    logger.error("[VM API] Error fetching VMs: %s\n%s", e, traceback.format_exc())
 
         proxmox_count = sum(1 for v in all_vms if v.get('type') == 'proxmox')
         azure_count   = sum(1 for v in all_vms if v.get('type') == 'azure')
@@ -233,14 +233,13 @@ def get_nodes():
 @vm_bp.get('/api/azure/status')
 def azure_status():
     """Diagnostic endpoint to check Azure client status."""
-    import os as _os
     try:
         from azure_client import get_azure_client as _gac
         env_status = {
-            'AZURE_CLIENT_ID':       'SET' if _os.getenv('AZURE_CLIENT_ID') else 'NOT SET',
-            'AZURE_CLIENT_SECRET':   'SET' if _os.getenv('AZURE_CLIENT_SECRET') else 'NOT SET',
-            'AZURE_TENANT_ID':       'SET' if _os.getenv('AZURE_TENANT_ID') else 'NOT SET',
-            'AZURE_SUBSCRIPTION_ID': _os.getenv('AZURE_SUBSCRIPTION_ID') or 'NOT SET (will search all subscriptions)',
+            'AZURE_CLIENT_ID':       'SET' if os.getenv('AZURE_CLIENT_ID') else 'NOT SET',
+            'AZURE_CLIENT_SECRET':   'SET' if os.getenv('AZURE_CLIENT_SECRET') else 'NOT SET',
+            'AZURE_TENANT_ID':       'SET' if os.getenv('AZURE_TENANT_ID') else 'NOT SET',
+            'AZURE_SUBSCRIPTION_ID': os.getenv('AZURE_SUBSCRIPTION_ID') or 'NOT SET (will search all subscriptions)',
         }
         azure = _gac()
         if azure:
@@ -282,14 +281,13 @@ def azure_status():
 @vm_bp.get('/api/aws/status')
 def aws_status():
     """Diagnostic endpoint to check AWS client status."""
-    import os as _os
     try:
         from aws_client import get_aws_client as _gac
         env_status = {
-            'AWS_ACCESS_KEY_ID':     'SET' if _os.getenv('AWS_ACCESS_KEY_ID') else 'NOT SET',
-            'AWS_SECRET_ACCESS_KEY': 'SET' if _os.getenv('AWS_SECRET_ACCESS_KEY') else 'NOT SET',
-            'AWS_REGION':            _os.getenv('AWS_REGION') or 'NOT SET (will search all regions)',
-            'AWS_SESSION_TOKEN':     'SET' if _os.getenv('AWS_SESSION_TOKEN') else 'NOT SET (optional)',
+            'AWS_ACCESS_KEY_ID':     'SET' if os.getenv('AWS_ACCESS_KEY_ID') else 'NOT SET',
+            'AWS_SECRET_ACCESS_KEY': 'SET' if os.getenv('AWS_SECRET_ACCESS_KEY') else 'NOT SET',
+            'AWS_REGION':            os.getenv('AWS_REGION') or 'NOT SET (will search all regions)',
+            'AWS_SESSION_TOKEN':     'SET' if os.getenv('AWS_SESSION_TOKEN') else 'NOT SET (optional)',
         }
         aws = _gac()
         if aws:
