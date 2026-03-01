@@ -124,10 +124,19 @@ def launch_lab(lab_id: str):
     except KeyError:
         return _err(f"Lab '{lab_id}' not found", 404)
 
-    # Local dockerk8s launch — no GitHub Actions required
+    # Local dockerk8s / codeserver launch — no GitHub Actions required
     if lab.get("type") == "dockerk8s":
         try:
             lc.launch_dockerk8s_lab(lab_id)
+            return jsonify({"run_triggered": True})
+        except RuntimeError as e:
+            return _err(str(e), 422)
+        except Exception as e:
+            return _err(str(e), 500)
+
+    if lab.get("type") == "codeserver":
+        try:
+            lc.launch_codeserver_lab(lab_id)
             return jsonify({"run_triggered": True})
         except RuntimeError as e:
             return _err(str(e), 422)
@@ -190,7 +199,14 @@ def stop_lab(lab_id: str):
         except Exception as e:
             return _err(str(e), 500)
 
-    return _err("Stop is only supported for dockerk8s labs", 400)
+    if lab.get("type") == "codeserver":
+        try:
+            lc.stop_codeserver_lab(lab_id)
+            return jsonify({"stopped": True})
+        except Exception as e:
+            return _err(str(e), 500)
+
+    return _err("Stop is only supported for dockerk8s and codeserver labs", 400)
 
 
 @labs_bp.get("/<path:lab_id>/status")
@@ -200,10 +216,17 @@ def get_lab_status(lab_id: str):
     except KeyError:
         return _err(f"Lab '{lab_id}' not found", 404)
 
-    # Local dockerk8s status — check container/pod state directly
+    # Local dockerk8s / codeserver status — check container/pod state directly
     if lab.get("type") == "dockerk8s":
         try:
             status = lc.get_dockerk8s_status(lab_id)
+            return jsonify(status)
+        except Exception as e:
+            return _err(str(e), 500)
+
+    if lab.get("type") == "codeserver":
+        try:
+            status = lc.get_codeserver_status(lab_id)
             return jsonify(status)
         except Exception as e:
             return _err(str(e), 500)
