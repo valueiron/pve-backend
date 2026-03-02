@@ -255,12 +255,23 @@ def register_lab_vms(lab_id: str, vms: list) -> list:
     for v in vms:
         if not isinstance(v, dict) or "vmid" not in v:
             continue
-        validated.append({
-            "vmid": int(v["vmid"]),
-            "name": str(v.get("name", f"VM {v['vmid']}")),
+        raw_vmid = v["vmid"]
+        # Support both numeric (Proxmox) and string (AWS/cloud) vmids
+        try:
+            vmid = int(raw_vmid)
+        except (ValueError, TypeError):
+            vmid = str(raw_vmid)
+        entry = {
+            "vmid": vmid,
+            "name": str(v.get("name", f"VM {vmid}")),
             "source": "dynamic",
             "registered_at": _now_iso(),
-        })
+        }
+        # Preserve extra fields for cloud VMs (type, public_ip, region, etc.)
+        for key in ("type", "public_ip", "region"):
+            if key in v:
+                entry[key] = v[key]
+        validated.append(entry)
     data[lab_id] = validated
     _save_lab_vms(data)
     return validated
