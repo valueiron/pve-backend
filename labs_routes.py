@@ -209,6 +209,19 @@ def stop_lab(lab_id: str):
     return _err("Stop is only supported for dockerk8s and codeserver labs", 400)
 
 
+@labs_bp.post("/<path:lab_id>/validate")
+def validate_lab(lab_id: str):
+    try:
+        result = lc.run_lab_validation(lab_id)
+        return jsonify(result)
+    except KeyError:
+        return _err(f"Lab '{lab_id}' not found", 404)
+    except RuntimeError as e:
+        return _err(str(e), 422)
+    except Exception as e:
+        return _err(str(e), 500)
+
+
 @labs_bp.get("/<path:lab_id>/status")
 def get_lab_status(lab_id: str):
     try:

@@ -197,6 +197,17 @@ def _parse_lab_yml(lab_yml_path: Path, repo_id: str) -> dict | None:
                 "source": "static",
             })
 
+    grading = meta.get("grading") or {}
+    validation_script = grading.get("validation")  # e.g. "validation/check.sh"
+
+    # Tips: list of strings or dicts with {title, content}
+    raw_tips = meta.get("tips", [])
+    tips = [t for t in raw_tips if t] if isinstance(raw_tips, list) else []
+
+    # Solutions: list of strings or dicts with {title, content}
+    raw_solutions = meta.get("solutions", [])
+    solutions = [s for s in raw_solutions if s] if isinstance(raw_solutions, list) else []
+
     return {
         "id": lab_id,
         "name": meta.get("name", lab_folder.name),
@@ -213,6 +224,10 @@ def _parse_lab_yml(lab_yml_path: Path, repo_id: str) -> dict | None:
         # Optional manifest filenames (relative to the lab directory)
         "docker_compose": meta.get("docker_compose"),  # e.g. "docker-compose.yml"
         "k8s_manifest": meta.get("k8s_manifest"),      # e.g. "k8s-manifest.yaml"
+        # Grading / hints
+        "validation": validation_script,
+        "tips": tips,
+        "solutions": solutions,
     }
 
 
@@ -246,6 +261,37 @@ def get_lab_instructions(lab_id: str) -> str:
     if not instructions_path.exists():
         return "# No instructions found\n\nThis lab does not have an `instructions.md` file."
     return instructions_path.read_text()
+
+
+def run_lab_validation(lab_id: str) -> dict:
+    """Run the validation script for a lab.
+
+    Returns {"passed": bool, "output": str}.
+    Raises RuntimeError if no validation script is configured or the file is missing.
+    """
+    lab = get_lab(lab_id)
+    validation_script = lab.get("validation")
+    if not validation_script:
+        raise RuntimeError("This lab does not have a validation script configured.")
+
+    lab_path = Path(lab["lab_path"])
+    script_path = lab_path / validation_script
+    if not script_path.exists():
+        raise RuntimeError(f"Validation script not found: {validation_script}")
+
+    result = subprocess.run(
+        ["sh", str(script_path)],
+        cwd=str(lab_path),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    output = (result.stdout + result.stderr).strip()
+    return {
+        "passed": result.returncode == 0,
+        "output": output,
+    }
 
 
 def register_lab_vms(lab_id: str, vms: list) -> list:
