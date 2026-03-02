@@ -6,6 +6,7 @@ Cloned repos live under LABS_DIR (env var, default ./labs_repos).
 Each lab folder must contain a lab.yml with metadata.
 """
 
+import asyncio
 import json
 import os
 import subprocess
@@ -13,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import asyncssh
 import requests
 import yaml
 
@@ -199,6 +201,7 @@ def _parse_lab_yml(lab_yml_path: Path, repo_id: str) -> dict | None:
 
     grading = meta.get("grading") or {}
     validation_script = grading.get("validation")  # e.g. "validation/check.sh"
+    validation_vm = grading.get("validation_vm")   # optional vmid to SSH into for validation
 
     # Tips: list of strings or dicts with {title, content}
     raw_tips = meta.get("tips", [])
@@ -226,6 +229,7 @@ def _parse_lab_yml(lab_yml_path: Path, repo_id: str) -> dict | None:
         "k8s_manifest": meta.get("k8s_manifest"),      # e.g. "k8s-manifest.yaml"
         # Grading / hints
         "validation": validation_script,
+        "validation_vm": validation_vm,
         "tips": tips,
         "solutions": solutions,
     }
@@ -263,12 +267,43 @@ def get_lab_instructions(lab_id: str) -> str:
     return instructions_path.read_text()
 
 
+def _resolve_vm_ip(vm: dict) -> str | None:
+    """Return an SSH-reachable IP for a VM dict, or None if it can't be resolved.
+
+    - Cloud VMs (AWS, etc.) carry a ``public_ip`` field written by GitHub Actions.
+    - Proxmox VMs have a numeric ``vmid``; their IP is fetched via the guest agent.
+    """
+    if vm.get("public_ip"):
+        return vm["public_ip"]
+
+    vmid = vm.get("vmid")
+    try:
+        vmid_int = int(vmid)
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        from proxmox_client import get_proxmox_client
+        proxmox = get_proxmox_client()
+        node = proxmox._find_vm_node(vmid_int)
+        ips = proxmox._get_vm_ip_addresses(vmid_int, node)
+        return ips[0] if ips else None
+    except Exception:
+        return None
+
+
 def run_lab_validation(lab_id: str) -> dict:
     """Run the validation script for a lab.
+
+    For labs with reachable VMs the script is executed remotely over SSH so that
+    tools installed on the VM (curl, kubectl, etc.) are available.  Falls back to
+    running the script locally on pve-backend when no VM IP can be resolved.
 
     Returns {"passed": bool, "output": str}.
     Raises RuntimeError if no validation script is configured or the file is missing.
     """
+    import config
+
     lab = get_lab(lab_id)
     validation_script = lab.get("validation")
     if not validation_script:
@@ -279,6 +314,47 @@ def run_lab_validation(lab_id: str) -> dict:
     if not script_path.exists():
         raise RuntimeError(f"Validation script not found: {validation_script}")
 
+    script_content = script_path.read_text()
+
+    # ── Try to run remotely via SSH ────────────────────────────────────────────
+    lab_vms = get_lab_vms(lab_id)
+
+    # Honour an explicit validation_vm from lab.yml; otherwise use the first VM.
+    pinned_vmid = lab.get("validation_vm")
+    if pinned_vmid:
+        target_vm = next(
+            (v for v in lab_vms if str(v.get("vmid")) == str(pinned_vmid)), None
+        )
+    else:
+        target_vm = lab_vms[0] if lab_vms else None
+
+    if target_vm and config.SSH_USERNAME and config.ssh_private_key:
+        ip = _resolve_vm_ip(target_vm)
+        if ip:
+            async def _run_remote():
+                conn = await asyncssh.connect(
+                    host=ip,
+                    port=config.SSH_PORT,
+                    username=config.SSH_USERNAME,
+                    client_keys=[config.ssh_private_key],
+                    known_hosts=None,
+                    connect_timeout=10,
+                )
+                async with conn:
+                    result = await conn.run(
+                        'sh', input=script_content, check=False
+                    )
+                    output = (
+                        (result.stdout or '') + (result.stderr or '')
+                    ).strip()
+                    return {
+                        "passed": result.exit_status == 0,
+                        "output": output,
+                    }
+
+            return asyncio.run(_run_remote())
+
+    # ── Local fallback ─────────────────────────────────────────────────────────
     result = subprocess.run(
         ["sh", str(script_path)],
         cwd=str(lab_path),
@@ -286,7 +362,6 @@ def run_lab_validation(lab_id: str) -> dict:
         text=True,
         timeout=60,
     )
-
     output = (result.stdout + result.stderr).strip()
     return {
         "passed": result.returncode == 0,
