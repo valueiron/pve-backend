@@ -412,6 +412,9 @@ def get_lab_vms(lab_id: str) -> list:
     if lab.get("type") == "codeserver":
         return _get_codeserver_targets(lab_id)
 
+    if lab.get("type") == "chromium":
+        return _get_chromium_targets(lab_id)
+
     static_vms = lab.get("vms", [])
     data = _load_lab_vms()
     dynamic_vms = data.get(lab_id, [])
@@ -795,6 +798,145 @@ def _get_codeserver_targets(lab_id: str) -> list:
                 "name": "VS Code",
                 "type": "codeserver",
                 "proxy_path": "/codeserver/",
+            }]
+    except Exception:
+        pass
+
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Chromium browser lab support
+# ---------------------------------------------------------------------------
+
+# Fixed container name — nginx.conf has a static /chromium/ proxy pointing here.
+_CHROMIUM_CONTAINER_NAME = "lab-chromium"
+
+
+def launch_chromium_lab(lab_id: str, chrome_url: str = "https://www.google.com") -> dict:
+    """Provision the linuxserver/chromium Docker container for a chromium lab.
+
+    Uses a fixed container name (lab-chromium) so nginx can proxy to it by name.
+    SUBFOLDER=/chromium/ tells the container to serve its web UI at /chromium/
+    so the nginx proxy can forward the path without stripping it.
+    """
+    # Remove any existing container with the same name first (idempotent re-launch).
+    try:
+        requests.delete(
+            f"{DOCKER_API_URL}/containers/{_CHROMIUM_CONTAINER_NAME}",
+            params={"force": "true"},
+            timeout=30,
+        )
+    except Exception:
+        pass
+
+    resp = requests.post(
+        f"{DOCKER_API_URL}/containers/run",
+        json={
+            "image": "lscr.io/linuxserver/chromium:latest",
+            "name": _CHROMIUM_CONTAINER_NAME,
+            "environment": [
+                "PUID=1000",
+                "PGID=1000",
+                "TZ=Etc/UTC",
+                f"CHROME_CLI={chrome_url}",
+                "SUBFOLDER=/chromium/",
+            ],
+            "shm_size": 1073741824,  # 1 GiB
+            "labels": {"app": "lab-chromium", "lab": lab_id},
+        },
+        timeout=180,  # image pull may take a while
+    )
+    if not resp.ok:
+        raise RuntimeError(f"Failed to create chromium container: {resp.text}")
+
+    container_id = resp.json()["id"]
+
+    # Connect to the portal network so nginx can reach the container by name.
+    try:
+        requests.post(
+            f"{DOCKER_API_URL}/networks/{PORTAL_NETWORK}/connect",
+            json={"container": container_id},
+            timeout=15,
+        )
+    except Exception:
+        pass  # Non-fatal — the /chromium/ proxy may still work if nginx resolves by name.
+
+    state_entry = {
+        "type": "chromium",
+        "launched_at": _now_iso(),
+        "container_id": container_id,
+        "container_name": _CHROMIUM_CONTAINER_NAME,
+        "chrome_url": chrome_url,
+    }
+    state = _load_lab_state()
+    state[lab_id] = state_entry
+    _save_lab_state(state)
+    return state_entry
+
+
+def stop_chromium_lab(lab_id: str) -> None:
+    """Remove the chromium container."""
+    state = _load_lab_state()
+    entry = state.get(lab_id)
+    if not entry:
+        return
+
+    container_id = entry.get("container_id")
+    if container_id:
+        try:
+            requests.delete(
+                f"{DOCKER_API_URL}/containers/{container_id}",
+                params={"force": "true"},
+                timeout=30,
+            )
+        except Exception:
+            pass
+
+    del state[lab_id]
+    _save_lab_state(state)
+
+
+def get_chromium_status(lab_id: str) -> dict:
+    """Return a status dict for a chromium lab (mirrors get_lab_run_status shape)."""
+    state = _load_lab_state()
+    entry = state.get(lab_id)
+    if not entry:
+        return {"status": "idle", "conclusion": None, "run_id": None, "html_url": None}
+
+    container_id = entry.get("container_id")
+    if not container_id:
+        return {"status": "idle", "conclusion": None, "run_id": None, "html_url": None}
+
+    try:
+        resp = requests.get(f"{DOCKER_API_URL}/containers/{container_id}", timeout=10)
+        if resp.ok and resp.json().get("State", {}).get("Status") == "running":
+            return {"status": "completed", "conclusion": "success", "run_id": None, "html_url": None}
+    except Exception:
+        pass
+
+    return {"status": "in_progress", "conclusion": None, "run_id": None, "html_url": None}
+
+
+def _get_chromium_targets(lab_id: str) -> list:
+    """Return the chromium iframe target when the container is running."""
+    state = _load_lab_state()
+    entry = state.get(lab_id)
+    if not entry:
+        return []
+
+    container_id = entry.get("container_id")
+    if not container_id:
+        return []
+
+    try:
+        resp = requests.get(f"{DOCKER_API_URL}/containers/{container_id}", timeout=10)
+        if resp.ok and resp.json().get("State", {}).get("Status") == "running":
+            return [{
+                "vmid": "chromium",
+                "name": "Chromium",
+                "type": "chromium",
+                "proxy_path": "/chromium/",
             }]
     except Exception:
         pass
