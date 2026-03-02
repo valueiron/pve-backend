@@ -204,8 +204,35 @@ def create_terminal_session(vmid):
     try:
         vmid_int = int(vmid)
     except ValueError:
-        return jsonify({"error": f"Invalid vmid: {vmid}"}), 400
+        vmid_int = None
 
+    # Non-numeric vmid: look up in registered lab VMs (e.g. AWS EC2 instances)
+    if vmid_int is None:
+        from labs_client import _load_lab_vms
+        ip = None
+        for _lab_id, lab_vms in _load_lab_vms().items():
+            for v in lab_vms:
+                if str(v.get("vmid")) == vmid:
+                    ip = v.get("public_ip")
+                    break
+            if ip:
+                break
+
+        if not ip:
+            return jsonify({"error": f"No IP found for vmid '{vmid}' — ensure the lab VM is registered"}), 400
+
+        session_id = str(uuid.uuid4())
+        with ssh_sessions._ssh_sessions_lock:
+            ssh_sessions._ssh_sessions[session_id] = {
+                'vmid': vmid,
+                'ip': ip,
+                'username': config.SSH_USERNAME,
+            }
+
+        logger.info("[SSH API] Created session %s for cloud VM %s at %s", session_id, vmid, ip)
+        return jsonify({"sessionId": session_id, "vmid": vmid, "ip": ip}), 200
+
+    # Numeric vmid: Proxmox VM
     try:
         proxmox = get_proxmox_client()
         node = proxmox._find_vm_node(vmid_int)

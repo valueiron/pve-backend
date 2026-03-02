@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -30,7 +31,8 @@ class AWSClient:
         self.access_key_id     = os.getenv('AWS_ACCESS_KEY_ID', '').strip()
         self.secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY', '').strip()
         self.region            = os.getenv('AWS_REGION', '').strip()
-        self.session_token     = os.getenv('AWS_SESSION_TOKEN', '').strip()
+        raw_token = os.getenv('AWS_SESSION_TOKEN', '').strip()
+        self.session_token = raw_token if raw_token and not raw_token.startswith('#') else ''
 
         if not all([self.access_key_id, self.secret_access_key]):
             raise ValueError(
