@@ -143,6 +143,16 @@ def launch_lab(lab_id: str):
         except Exception as e:
             return _err(str(e), 500)
 
+    if lab.get("type") == "chromium":
+        chrome_url = body.get("chrome_url", "https://www.google.com").strip() or "https://www.google.com"
+        try:
+            lc.launch_chromium_lab(lab_id, chrome_url)
+            return jsonify({"run_triggered": True})
+        except RuntimeError as e:
+            return _err(str(e), 422)
+        except Exception as e:
+            return _err(str(e), 500)
+
     # Resolve the repo URL for this lab
     repos = lc.get_repos()
     repo = next((r for r in repos if r["id"] == lab["repo_id"]), None)
@@ -206,7 +216,14 @@ def stop_lab(lab_id: str):
         except Exception as e:
             return _err(str(e), 500)
 
-    return _err("Stop is only supported for dockerk8s and codeserver labs", 400)
+    if lab.get("type") == "chromium":
+        try:
+            lc.stop_chromium_lab(lab_id)
+            return jsonify({"stopped": True})
+        except Exception as e:
+            return _err(str(e), 500)
+
+    return _err("Stop is only supported for dockerk8s, codeserver, and chromium labs", 400)
 
 
 @labs_bp.post("/<path:lab_id>/validate")
@@ -240,6 +257,13 @@ def get_lab_status(lab_id: str):
     if lab.get("type") == "codeserver":
         try:
             status = lc.get_codeserver_status(lab_id)
+            return jsonify(status)
+        except Exception as e:
+            return _err(str(e), 500)
+
+    if lab.get("type") == "chromium":
+        try:
+            status = lc.get_chromium_status(lab_id)
             return jsonify(status)
         except Exception as e:
             return _err(str(e), 500)
