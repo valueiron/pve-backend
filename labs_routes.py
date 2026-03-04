@@ -84,25 +84,6 @@ def list_labs():
         return _err(str(e), 500)
 
 
-@labs_bp.get("/<path:lab_id>")
-def get_lab(lab_id: str):
-    # Prevent catching sub-routes that are handled above
-    # Flask route ordering ensures /repos routes match first.
-    try:
-        lab = lc.get_lab(lab_id)
-        return jsonify({"lab": lab})
-    except KeyError:
-        return _err(f"Lab '{lab_id}' not found", 404)
-    except Exception as e:
-        return _err(str(e), 500)
-
-
-# ---------------------------------------------------------------------------
-# Per-lab action endpoints
-# We register these before the generic /<lab_id> catch-all so Flask
-# matches them first when the suffix is /instructions, /launch, or /status.
-# ---------------------------------------------------------------------------
-
 @labs_bp.get("/<path:lab_id>/instructions")
 def get_lab_instructions(lab_id: str):
     try:
@@ -278,5 +259,21 @@ def get_lab_status(lab_id: str):
         return jsonify(status)
     except RuntimeError as e:
         return _err(str(e), 422)
+    except Exception as e:
+        return _err(str(e), 500)
+
+
+# ---------------------------------------------------------------------------
+# Generic lab detail — must be registered LAST so the sub-routes above
+# (/<path:lab_id>/vms, /status, /instructions, etc.) are tried first.
+# ---------------------------------------------------------------------------
+
+@labs_bp.get("/<path:lab_id>")
+def get_lab(lab_id: str):
+    try:
+        lab = lc.get_lab(lab_id)
+        return jsonify({"lab": lab})
+    except KeyError:
+        return _err(f"Lab '{lab_id}' not found", 404)
     except Exception as e:
         return _err(str(e), 500)
