@@ -6,6 +6,8 @@ Covers: /api/vms, /api/nodes, /api/azure/status, /api/aws/status
 
 import logging
 import os
+import time
+import threading
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,6 +22,23 @@ logger = logging.getLogger(__name__)
 
 vm_bp = Blueprint('vm', __name__)
 
+# ── Server-side VM list cache ───────────────────────────────────────────────────
+_vm_cache_lock = threading.Lock()
+_vm_cache = {'data': None, 'expires_at': 0}
+_VM_CACHE_TTL = 10  # seconds
+
+
+def _get_cached_vms(fetch_fn):
+    """Return cached VM list if fresh, otherwise call fetch_fn() and cache the result."""
+    with _vm_cache_lock:
+        if _vm_cache['data'] is not None and time.monotonic() < _vm_cache['expires_at']:
+            return _vm_cache['data'], True  # (data, from_cache)
+    result = fetch_fn()
+    with _vm_cache_lock:
+        _vm_cache['data'] = result
+        _vm_cache['expires_at'] = time.monotonic() + _VM_CACHE_TTL
+    return result, False
+
 
 # ── /api/vms ───────────────────────────────────────────────────────────────────
 
@@ -27,45 +46,49 @@ vm_bp = Blueprint('vm', __name__)
 def get_vms():
     """List all VMs across Proxmox, Azure, and AWS."""
     try:
-        def _fetch_proxmox():
-            proxmox = get_proxmox_client()
-            vms = proxmox.get_all_vms()
-            for vm in vms:
-                vm['type'] = 'proxmox'
-            return ('proxmox', vms)
+        def _fetch_all():
+            def _fetch_proxmox():
+                proxmox = get_proxmox_client()
+                vms = proxmox.get_all_vms()
+                for vm in vms:
+                    vm['type'] = 'proxmox'
+                return ('proxmox', vms)
 
-        def _fetch_azure():
-            if not config.AZURE_AVAILABLE:
-                return ('azure', [])
-            azure = config.get_azure_client()
-            return ('azure', azure.get_all_vms() if azure else [])
+            def _fetch_azure():
+                if not config.AZURE_AVAILABLE:
+                    return ('azure', [])
+                azure = config.get_azure_client()
+                return ('azure', azure.get_all_vms() if azure else [])
 
-        def _fetch_aws():
-            if not config.AWS_AVAILABLE:
-                return ('aws', [])
-            aws = config.get_aws_client()
-            return ('aws', aws.get_all_vms() if aws else [])
+            def _fetch_aws():
+                if not config.AWS_AVAILABLE:
+                    return ('aws', [])
+                aws = config.get_aws_client()
+                return ('aws', aws.get_all_vms() if aws else [])
 
-        all_vms = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [
-                executor.submit(_fetch_proxmox),
-                executor.submit(_fetch_azure),
-                executor.submit(_fetch_aws),
-            ]
-            for future in as_completed(futures):
-                try:
-                    source, vms = future.result()
-                    all_vms.extend(vms)
-                    logger.info("[VM API] Fetched %d %s VMs", len(vms), source)
-                except Exception as e:
-                    logger.error("[VM API] Error fetching VMs: %s\n%s", e, traceback.format_exc())
+            combined = []
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = [
+                    executor.submit(_fetch_proxmox),
+                    executor.submit(_fetch_azure),
+                    executor.submit(_fetch_aws),
+                ]
+                for future in as_completed(futures):
+                    try:
+                        source, vms = future.result()
+                        combined.extend(vms)
+                        logger.info("[VM API] Fetched %d %s VMs", len(vms), source)
+                    except Exception as e:
+                        logger.error("[VM API] Error fetching VMs: %s\n%s", e, traceback.format_exc())
+            return combined
+
+        all_vms, from_cache = _get_cached_vms(_fetch_all)
 
         proxmox_count = sum(1 for v in all_vms if v.get('type') == 'proxmox')
         azure_count   = sum(1 for v in all_vms if v.get('type') == 'azure')
         aws_count     = sum(1 for v in all_vms if v.get('type') == 'aws')
-        logger.info("[VM API] Returning %d VMs (%d Proxmox, %d Azure, %d AWS)",
-                    len(all_vms), proxmox_count, azure_count, aws_count)
+        logger.info("[VM API] Returning %d VMs (%d Proxmox, %d Azure, %d AWS) [cache=%s]",
+                    len(all_vms), proxmox_count, azure_count, aws_count, from_cache)
         return jsonify({"vms": all_vms}), 200
     except Exception as e:
         logger.error("[VM API] Fatal error: %s\n%s", e, traceback.format_exc())

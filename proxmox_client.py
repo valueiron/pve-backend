@@ -4,6 +4,7 @@ Handles connection to Proxmox VE API using direct HTTP requests.
 """
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import ipaddress
 from dotenv import load_dotenv
@@ -249,93 +250,78 @@ class ProxmoxClient:
         all_vms = []
         
         try:
-            # Try to use /cluster/resources endpoint first (more efficient, includes tags)
+            # /cluster/resources?type=vm returns all the data we need in a single call:
+            # vmid, name, node, status, cpu, mem, maxmem, disk, maxdisk, uptime, template, tags.
+            # This avoids the previous pattern of 3 serial calls (/cluster/resources +
+            # /nodes + per-node /qemu).
             try:
                 resources = self._make_request('GET', '/cluster/resources', {'type': 'vm'})
-                
-                # Build a map of VMID to tags + disk usage from cluster resources.
-                # /cluster/resources gives correct disk=used_space, maxdisk=total_size.
-                # The per-node /qemu list returns disk=write_IO_bytes (wrong for storage display).
-                tags_map = {}
-                disk_map = {}  # vmid -> {disk, maxdisk}
-                for resource in resources:
-                    if resource.get('type') == 'qemu':
-                        vmid = resource.get('vmid')
-                        if vmid:
-                            # Tags are stored as comma or semicolon-separated string
-                            tags_str = resource.get('tags', '')
-                            tags = []
-                            if tags_str:
-                                # Handle both comma and semicolon separators
-                                # Split by semicolon first, then by comma, and flatten
-                                tags = []
-                                for part in tags_str.split(';'):
-                                    if ',' in part:
-                                        tags.extend([tag.strip() for tag in part.split(',') if tag.strip()])
-                                    else:
-                                        tag = part.strip()
-                                        if tag:
-                                            tags.append(tag)
-                            tags_map[vmid] = tags
-                            disk_map[vmid] = {
-                                'disk': resource.get('disk', 0),
-                                'maxdisk': resource.get('maxdisk', 0),
-                            }
-                
-                # Now get detailed VM info from each node
-                nodes = self._make_request('GET', '/nodes')
-                
-                for node in nodes:
-                    node_name = node['node']
-                    
-                    try:
-                        # Get all VMs (QEMU/KVM) on this node
-                        vms = self._make_request('GET', f'/nodes/{node_name}/qemu')
-                        
-                        for vm in vms:
-                            # Filter out templates - templates have template=1
-                            if vm.get('template', 0) == 1:
-                                continue
-                            
-                            vmid = vm.get('vmid')
-                            # Get tags from the map we built earlier
-                            tags = tags_map.get(vmid, [])
-                            
-                            vm_status = vm.get('status', 'unknown')
-                            
-                            # Fetch IP addresses from guest agent if VM is running
-                            ip_addresses = []
-                            if vm_status == 'running':
-                                try:
-                                    ip_addresses = self._get_vm_ip_addresses(vmid, node_name)
-                                except Exception as e:
-                                    # If IP fetching fails, continue without IP addresses
-                                    print(f"Warning: Could not fetch IP addresses for VM {vmid}: {str(e)}")
-                                    ip_addresses = []
-                            
-                            disk_info = disk_map.get(vmid, {})
-                            vm_info = {
-                                'vmid': vmid,
-                                'name': vm.get('name', ''),
-                                'status': vm_status,
-                                'node': node_name,
-                                'cpu': vm.get('cpu', 0),
-                                'mem': vm.get('mem', 0),
-                                'maxmem': vm.get('maxmem', 0),
-                                'disk': disk_info.get('disk', vm.get('disk', 0)),
-                                'maxdisk': disk_info.get('maxdisk', vm.get('maxdisk', 0)),
-                                'uptime': vm.get('uptime', 0),
-                                'tags': tags,
-                                'ip_addresses': ip_addresses
-                            }
-                            all_vms.append(vm_info)
 
-                    except Exception as e:
-                        # Log error but continue with other nodes
-                        print(f"Error fetching VMs from node {node_name}: {str(e)}")
+                # Parse all non-template QEMU VMs from the cluster resource list
+                vm_list = []   # all vm_info dicts
+                running = []   # (vmid, node_name) pairs needing IP lookup
+
+                for resource in resources:
+                    if resource.get('type') != 'qemu':
+                        continue
+                    if resource.get('template', 0) == 1:
                         continue
 
-                return all_vms
+                    vmid = resource.get('vmid')
+                    node_name = resource.get('node', '')
+                    vm_status = resource.get('status', 'unknown')
+
+                    # Parse tags (semicolon or comma separated)
+                    tags = []
+                    tags_str = resource.get('tags', '')
+                    if tags_str:
+                        for part in tags_str.split(';'):
+                            if ',' in part:
+                                tags.extend([t.strip() for t in part.split(',') if t.strip()])
+                            else:
+                                t = part.strip()
+                                if t:
+                                    tags.append(t)
+
+                    vm_info = {
+                        'vmid': vmid,
+                        'name': resource.get('name', ''),
+                        'status': vm_status,
+                        'node': node_name,
+                        'cpu': resource.get('cpu', 0),
+                        'mem': resource.get('mem', 0),
+                        'maxmem': resource.get('maxmem', 0),
+                        'disk': resource.get('disk', 0),
+                        'maxdisk': resource.get('maxdisk', 0),
+                        'uptime': resource.get('uptime', 0),
+                        'tags': tags,
+                        'ip_addresses': [],
+                    }
+
+                    vm_list.append(vm_info)
+                    if vm_status == 'running':
+                        running.append((vmid, node_name))
+
+                # Fetch IPs for all running VMs in parallel (across all nodes at once)
+                if running:
+                    def _fetch_ip(args):
+                        vid, nname = args
+                        try:
+                            return vid, self._get_vm_ip_addresses(vid, nname)
+                        except Exception as e:
+                            print(f"Warning: Could not fetch IP for VM {vid}: {str(e)}")
+                            return vid, []
+
+                    ip_results = {}
+                    with ThreadPoolExecutor(max_workers=min(len(running), 10)) as ip_executor:
+                        for vid, ips in ip_executor.map(_fetch_ip, running):
+                            ip_results[vid] = ips
+
+                    for vm_info in vm_list:
+                        if vm_info['vmid'] in ip_results:
+                            vm_info['ip_addresses'] = ip_results[vm_info['vmid']]
+
+                return vm_list
 
             except Exception as cluster_error:
                 # Fallback to the original method if cluster/resources doesn't work
@@ -345,52 +331,34 @@ class ProxmoxClient:
                 # Get all nodes
                 nodes = self._make_request('GET', '/nodes')
                 
+                fb_vm_list = []
+                fb_running = []
+
                 for node in nodes:
                     node_name = node['node']
-                    
                     try:
-                        # Get all VMs (QEMU/KVM) on this node
                         vms = self._make_request('GET', f'/nodes/{node_name}/qemu')
-                        
                         for vm in vms:
-                            # Filter out templates - templates have template=1
                             if vm.get('template', 0) == 1:
                                 continue
-                            
                             vmid = vm.get('vmid')
                             vm_status = vm.get('status', 'unknown')
-                            
-                            # Get VM config to fetch tags
+
                             tags = []
                             try:
                                 vm_config = self._make_request('GET', f'/nodes/{node_name}/qemu/{vmid}/config')
-                                # Tags are stored as comma or semicolon-separated string in the config
                                 tags_str = vm_config.get('tags', '')
                                 if tags_str:
-                                    # Handle both comma and semicolon separators
-                                    # Split by semicolon first, then by comma, and flatten
-                                    tags = []
                                     for part in tags_str.split(';'):
                                         if ',' in part:
-                                            tags.extend([tag.strip() for tag in part.split(',') if tag.strip()])
+                                            tags.extend([t.strip() for t in part.split(',') if t.strip()])
                                         else:
-                                            tag = part.strip()
-                                            if tag:
-                                                tags.append(tag)
+                                            t = part.strip()
+                                            if t:
+                                                tags.append(t)
                             except Exception as e:
-                                # If we can't get tags, continue without them
                                 print(f"Warning: Could not fetch tags for VM {vmid} on node {node_name}: {str(e)}")
-                            
-                            # Fetch IP addresses from guest agent if VM is running
-                            ip_addresses = []
-                            if vm_status == 'running':
-                                try:
-                                    ip_addresses = self._get_vm_ip_addresses(vmid, node_name)
-                                except Exception as e:
-                                    # If IP fetching fails, continue without IP addresses
-                                    print(f"Warning: Could not fetch IP addresses for VM {vmid}: {str(e)}")
-                                    ip_addresses = []
-                            
+
                             vm_info = {
                                 'vmid': vmid,
                                 'name': vm.get('name', ''),
@@ -403,16 +371,35 @@ class ProxmoxClient:
                                 'maxdisk': vm.get('maxdisk', 0),
                                 'uptime': vm.get('uptime', 0),
                                 'tags': tags,
-                                'ip_addresses': ip_addresses
+                                'ip_addresses': [],
                             }
-                            all_vms.append(vm_info)
-                    
+                            fb_vm_list.append(vm_info)
+                            if vm_status == 'running':
+                                fb_running.append((vmid, node_name))
+
                     except Exception as e:
-                        # Log error but continue with other nodes
                         print(f"Error fetching VMs from node {node_name}: {str(e)}")
                         continue
-                
-                return all_vms
+
+                if fb_running:
+                    def _fb_fetch_ip(args):
+                        vid, nname = args
+                        try:
+                            return vid, self._get_vm_ip_addresses(vid, nname)
+                        except Exception as e:
+                            print(f"Warning: Could not fetch IP for VM {vid}: {str(e)}")
+                            return vid, []
+
+                    ip_results = {}
+                    with ThreadPoolExecutor(max_workers=min(len(fb_running), 10)) as ip_executor:
+                        for vid, ips in ip_executor.map(_fb_fetch_ip, fb_running):
+                            ip_results[vid] = ips
+
+                    for vm_info in fb_vm_list:
+                        if vm_info['vmid'] in ip_results:
+                            vm_info['ip_addresses'] = ip_results[vm_info['vmid']]
+
+                return fb_vm_list
         
         except Exception as e:
             raise Exception(f"Error fetching VMs from Proxmox: {str(e)}")
