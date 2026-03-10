@@ -10,7 +10,7 @@ from flask import Response, jsonify, request
 logger = logging.getLogger(__name__)
 
 
-def proxy_request(base_url: str, path: str, service_name: str, method: str = 'GET', **kwargs):
+def proxy_request(base_url: str, path: str, service_name: str, method: str = 'GET', timeout: int = 30, **kwargs):
     """Forward the current Flask request to a downstream service and return a Flask response."""
     url = f"{base_url}/{path.lstrip('/')}"
     try:
@@ -19,7 +19,7 @@ def proxy_request(base_url: str, path: str, service_name: str, method: str = 'GE
             url,
             params=request.args,
             json=request.get_json(silent=True),
-            timeout=30,
+            timeout=timeout,
             **kwargs,
         )
         content_type = resp.headers.get('Content-Type', 'application/json')
