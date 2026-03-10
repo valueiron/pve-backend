@@ -96,3 +96,18 @@ def docker_system_info():
 @docker_bp.get('/api/docker/system/disk')
 def docker_system_disk():
     return _p('system/disk')
+
+
+@docker_bp.get('/api/docker/vulnerabilities/status')
+def docker_vuln_status():
+    return _p('vulnerabilities/status')
+
+
+@docker_bp.post('/api/docker/vulnerabilities/download')
+def docker_vuln_download():
+    return _p('vulnerabilities/download', 'POST')
+
+
+@docker_bp.post('/api/docker/vulnerabilities/scan')
+def docker_vuln_scan():
+    return proxy_request(config.DOCKER_API_URL, 'vulnerabilities/scan', _SVC, 'POST', timeout=300)
