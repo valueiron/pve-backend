@@ -7,6 +7,7 @@ Prefix: /api/labs
 from flask import Blueprint, jsonify, request
 
 import labs_client as lc
+from labs.registry import create_lab
 
 labs_bp = Blueprint("labs", __name__, url_prefix="/api/labs")
 
@@ -98,55 +99,12 @@ def get_lab_instructions(lab_id: str):
 @labs_bp.post("/<path:lab_id>/launch")
 def launch_lab(lab_id: str):
     body = request.get_json(silent=True) or {}
-    action = body.get("action", "deploy")
-
     try:
-        lab = lc.get_lab(lab_id)
+        lab_def = lc.get_lab(lab_id)
     except KeyError:
         return _err(f"Lab '{lab_id}' not found", 404)
-
-    # Local dockerk8s / codeserver launch — no GitHub Actions required
-    if lab.get("type") == "dockerk8s":
-        try:
-            lc.launch_dockerk8s_lab(lab_id)
-            return jsonify({"run_triggered": True})
-        except RuntimeError as e:
-            return _err(str(e), 422)
-        except Exception as e:
-            return _err(str(e), 500)
-
-    if lab.get("type") == "codeserver":
-        try:
-            lc.launch_codeserver_lab(lab_id)
-            return jsonify({"run_triggered": True})
-        except RuntimeError as e:
-            return _err(str(e), 422)
-        except Exception as e:
-            return _err(str(e), 500)
-
-    if lab.get("type") == "chromium":
-        chrome_url = body.get("chrome_url", "https://www.google.com").strip() or "https://www.google.com"
-        try:
-            lc.launch_chromium_lab(lab_id, chrome_url)
-            return jsonify({"run_triggered": True})
-        except RuntimeError as e:
-            return _err(str(e), 422)
-        except Exception as e:
-            return _err(str(e), 500)
-
-    # Resolve the repo URL for this lab
-    repos = lc.get_repos()
-    repo = next((r for r in repos if r["id"] == lab["repo_id"]), None)
-    if repo is None:
-        return _err("Parent repo not found", 404)
-
     try:
-        result = lc.trigger_github_action(
-            repo_url=repo["url"],
-            lab_id=lab_id,
-            lab_path=lab["path"],
-            action=action,
-        )
+        result = create_lab(lab_def).launch(**body)
         return jsonify(result)
     except RuntimeError as e:
         return _err(str(e), 422)
@@ -157,8 +115,10 @@ def launch_lab(lab_id: str):
 @labs_bp.get("/<path:lab_id>/vms")
 def get_lab_vms(lab_id: str):
     try:
-        vms = lc.get_lab_vms(lab_id)
-        return jsonify({"vms": vms})
+        lab_def = lc.get_lab(lab_id)
+        return jsonify({"vms": create_lab(lab_def).get_targets()})
+    except KeyError:
+        return _err(f"Lab '{lab_id}' not found", 404)
     except Exception as e:
         return _err(str(e), 500)
 
@@ -179,32 +139,16 @@ def register_lab_vms(lab_id: str):
 @labs_bp.post("/<path:lab_id>/stop")
 def stop_lab(lab_id: str):
     try:
-        lab = lc.get_lab(lab_id)
+        lab_def = lc.get_lab(lab_id)
     except KeyError:
         return _err(f"Lab '{lab_id}' not found", 404)
-
-    if lab.get("type") == "dockerk8s":
-        try:
-            lc.stop_dockerk8s_lab(lab_id)
-            return jsonify({"stopped": True})
-        except Exception as e:
-            return _err(str(e), 500)
-
-    if lab.get("type") == "codeserver":
-        try:
-            lc.stop_codeserver_lab(lab_id)
-            return jsonify({"stopped": True})
-        except Exception as e:
-            return _err(str(e), 500)
-
-    if lab.get("type") == "chromium":
-        try:
-            lc.stop_chromium_lab(lab_id)
-            return jsonify({"stopped": True})
-        except Exception as e:
-            return _err(str(e), 500)
-
-    return _err("Stop is only supported for dockerk8s, codeserver, and chromium labs", 400)
+    try:
+        create_lab(lab_def).stop()
+        return jsonify({"stopped": True})
+    except RuntimeError as e:
+        return _err(str(e), 400)
+    except Exception as e:
+        return _err(str(e), 500)
 
 
 @labs_bp.post("/<path:lab_id>/validate")
@@ -223,40 +167,11 @@ def validate_lab(lab_id: str):
 @labs_bp.get("/<path:lab_id>/status")
 def get_lab_status(lab_id: str):
     try:
-        lab = lc.get_lab(lab_id)
+        lab_def = lc.get_lab(lab_id)
     except KeyError:
         return _err(f"Lab '{lab_id}' not found", 404)
-
-    # Local dockerk8s / codeserver status — check container/pod state directly
-    if lab.get("type") == "dockerk8s":
-        try:
-            status = lc.get_dockerk8s_status(lab_id)
-            return jsonify(status)
-        except Exception as e:
-            return _err(str(e), 500)
-
-    if lab.get("type") == "codeserver":
-        try:
-            status = lc.get_codeserver_status(lab_id)
-            return jsonify(status)
-        except Exception as e:
-            return _err(str(e), 500)
-
-    if lab.get("type") == "chromium":
-        try:
-            status = lc.get_chromium_status(lab_id)
-            return jsonify(status)
-        except Exception as e:
-            return _err(str(e), 500)
-
-    repos = lc.get_repos()
-    repo = next((r for r in repos if r["id"] == lab["repo_id"]), None)
-    if repo is None:
-        return _err("Parent repo not found", 404)
-
     try:
-        status = lc.get_lab_run_status(repo["url"])
-        return jsonify(status)
+        return jsonify(create_lab(lab_def).status())
     except RuntimeError as e:
         return _err(str(e), 422)
     except Exception as e:
