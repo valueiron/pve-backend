@@ -32,9 +32,12 @@ from cloud_routes import cloud_bp
 from docker_routes import docker_bp
 from k8s_routes   import k8s_bp
 from vyos_routes  import vyos_bp
+from route_api    import route_api_bp, start_auto_register
 
-for bp in (labs_bp, dns_bp, vm_bp, cloud_bp, docker_bp, k8s_bp, vyos_bp):
+for bp in (labs_bp, dns_bp, vm_bp, cloud_bp, docker_bp, k8s_bp, vyos_bp, route_api_bp):
     app.register_blueprint(bp)
+
+start_auto_register(app)
 
 # ── Prometheus metrics ─────────────────────────────────────────────────────────
 REQUEST_COUNT  = Counter('http_requests_total', 'Total HTTP requests', ['method', 'endpoint'])
