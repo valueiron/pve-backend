@@ -4,7 +4,7 @@ docker_routes.py — Flask Blueprint proxying requests to the docker-api service
 Prefix: /api/docker
 """
 
-from flask import Blueprint
+from flask import Blueprint, request
 
 import config
 from proxy import proxy_request
@@ -14,8 +14,8 @@ docker_bp = Blueprint('docker', __name__)
 _SVC = 'docker-api'
 
 
-def _p(path, method='GET'):
-    return proxy_request(config.DOCKER_API_URL, path, _SVC, method)
+def _p(path, method='GET', timeout=30):
+    return proxy_request(config.DOCKER_API_URL, path, _SVC, method, timeout=timeout)
 
 
 @docker_bp.get('/api/docker/containers')
@@ -111,3 +111,25 @@ def docker_vuln_download():
 @docker_bp.post('/api/docker/vulnerabilities/scan')
 def docker_vuln_scan():
     return proxy_request(config.DOCKER_API_URL, 'vulnerabilities/scan', _SVC, 'POST', timeout=300)
+
+
+# ── Agent / multi-host endpoints ──────────────────────────────────────────────
+
+@docker_bp.get('/api/docker/hosts')
+def docker_hosts():
+    return _p('agents/hosts')
+
+
+@docker_bp.post('/api/docker/agents')
+def docker_create_agent():
+    return _p('agents', 'POST')
+
+
+@docker_bp.delete('/api/docker/agents/<agent_id>')
+def docker_delete_agent(agent_id):
+    return _p(f'agents/{agent_id}', 'DELETE')
+
+
+@docker_bp.route('/api/docker/agents/<agent_id>/<path:subpath>', methods=['GET', 'POST', 'DELETE', 'PUT', 'PATCH'])
+def docker_agent_proxy(agent_id, subpath):
+    return _p(f'agents/{agent_id}/proxy/{subpath}', request.method)
