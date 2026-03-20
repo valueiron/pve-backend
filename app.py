@@ -33,8 +33,9 @@ from docker_routes import docker_bp
 from k8s_routes   import k8s_bp
 from vyos_routes  import vyos_bp
 from route_api    import route_api_bp, start_auto_register
+from tickets_routes import tickets_bp
 
-for bp in (labs_bp, dns_bp, vm_bp, cloud_bp, docker_bp, k8s_bp, vyos_bp, route_api_bp):
+for bp in (labs_bp, dns_bp, vm_bp, cloud_bp, docker_bp, k8s_bp, vyos_bp, route_api_bp, tickets_bp):
     app.register_blueprint(bp)
 
 start_auto_register(app)

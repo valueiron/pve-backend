@@ -18,6 +18,7 @@ K8S_API_URL    = os.getenv('K8S_API_URL',    'http://localhost:8081')
 VYOS_API_URL   = os.getenv('VYOS_API_URL',   'http://localhost:8082')
 ROUTE_API_URL    = os.getenv('ROUTE_API_URL', '')          # empty = feature disabled
 ROUTE_API_TENANT = os.getenv('ROUTE_API_TENANT', 'portal')
+TICKETS_API_URL  = os.getenv('TICKETS_API_URL', 'http://localhost:8084')
 # Auto-registration (requires ROUTE_API_URL to be set)
 PORTAL_HOSTNAME    = os.getenv('PORTAL_HOSTNAME', '')      # e.g. "portal.example.com"
 PORTAL_SERVICE_URL = os.getenv('PORTAL_SERVICE_URL', '')   # e.g. "http://pve-portal:80"
